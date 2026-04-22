@@ -1,0 +1,23 @@
+{
+  "columns": [
+    "Perfil",
+    "Criar rascunho",
+    "Editar rascunho",
+    "Enviar para aprovação",
+    "Aprovar",
+    "Publicar",
+    "Criar nova versão",
+    "Ver POP farmacêutico",
+    "Ver dashboard admin",
+    "Ver usuários",
+    "Ver leituras"
+  ],
+  "rows": [
+    ["diretor", "Sim", "Sim", "Sim", "Sim", "Sim", "Sim", "Sim", "Sim", "Sim", "Sim"],
+    ["gerente", "Sim", "Sim", "Sim", "Não", "Não", "Sim", "Não", "Não", "Não", "Sim"],
+    ["farmaceutico", "Sim", "Sim", "Sim", "Não", "Não", "Sim", "Sim", "Não", "Não", "Sim"],
+    ["atendente", "Sim", "Sim", "Sim", "Não", "Não", "Sim", "Não", "Não", "Não", "Sim"],
+    ["entregador", "Sim", "Sim", "Sim", "Não", "Não", "Sim", "Não", "Não", "Não", "Sim"]
+  ]
+}
+

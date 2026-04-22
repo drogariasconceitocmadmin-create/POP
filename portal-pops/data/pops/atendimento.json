@@ -1,0 +1,15 @@
+{
+  "titulo": "POP de Atendimento",
+  "status": "rascunho",
+  "exclusivoFarmaceutico": false,
+  "conteudoMarkdown": "## POP de Atendimento\n\n- Objetivo\n- Escopo\n- Procedimento\n- Checklists\n\n## Como fazer bem\nFicar de frente para o cliente, olhar para a cara dele e manter as mãos à vista em cima do balcão ao falar.\n\n## Erro crítico\nVirar as costas ou falar de perfil para o cliente com os olhos no ecrã.\n",
+  "como_fazer_bem": "Ficar de frente para o cliente, olhar para a cara dele e manter as mãos à vista em cima do balcão ao falar.",
+  "erro_critico": "Virar as costas ou falar de perfil para o cliente com os olhos no ecrã.",
+  "metadados": {
+    "autor": null,
+    "vigenciaInicio": null,
+    "revisaoPrevista": null,
+    "versao": 1
+  }
+}
+

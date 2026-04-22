@@ -1,0 +1,13 @@
+# Node (publicador local)
+portal-pops/node_modules/
+portal-pops/logs/
+
+# Credenciais / tokens (nunca versionar)
+portal-pops/config/oauth-client.json
+portal-pops/config/token.json
+
+# OS / editor
+Thumbs.db
+Desktop.ini
+.DS_Store
+.vscode/

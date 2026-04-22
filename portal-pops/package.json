@@ -1,0 +1,17 @@
+{
+  "name": "portal-pops",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Publicador local -> Google Drive/Docs/Sheets para o Portal de POPs Drogarias Conceito.",
+  "scripts": {
+    "auth": "node scripts/auth.js",
+    "publish": "node scripts/publish.js",
+    "publish:dry": "node scripts/publish.js --dry-run"
+  },
+  "dependencies": {
+    "googleapis": "^156.0.0",
+    "open": "^10.1.0"
+  }
+}
+

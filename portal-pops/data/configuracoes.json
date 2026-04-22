@@ -1,0 +1,18 @@
+{
+  "stack": {
+    "backend": "Google Apps Script",
+    "frontend": "HTML",
+    "database": "Google Sheets",
+    "files": "Google Drive"
+  },
+  "regras": {
+    "diretorAprovaEPublica": true,
+    "perfisCriamEditamRascunho": ["gerente", "farmaceutico", "atendente", "entregador"],
+    "edicaoVigenteCriaNovaVersao": true,
+    "leituraCriticaBloqueiaSistema": true,
+    "autorEhUsuarioLogado": true,
+    "vigenciaInicioAutomatica": true,
+    "revisaoPrevistaAutomatica": true
+  }
+}
+
