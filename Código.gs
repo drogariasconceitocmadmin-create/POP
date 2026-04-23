@@ -1,0 +1,5610 @@
+/**
+ * Portal de POPs — Drogarias Conceito
+ * Sprint 1 (base executável)
+ *
+ * Regras desta base:
+ * - Backend (Apps Script) controla sessão, permissões, regras e parsing.
+ * - Frontend (Index.html) apenas exibe/navega e aciona funções.
+ * - Versionamento/workflow completos virão nas próximas sprints.
+ *
+ * Observação importante:
+ * - A função publicar como vigente nesta Sprint é TEMPORÁRIA.
+ *   Ela existe somente como "api_setPopVigenteBasic" / "publicarPop" (Sprint 1).
+ *   Na Sprint 2 ela será substituída pelo workflow formal de aprovação.
+ */
+
+// =============================================================================
+// Config
+// =============================================================================
+
+var SPREADSHEET_ID = '1K_EsFW2aSUnAbGAUwkTRd43v7Q2v56yQ9oqPR3y4U3I';
+var LOGO_URL = 'https://drive.google.com/thumbnail?id=1RzVGSHiwmN9e0d9N7O1fjgP1OkOpTlov&sz=w512';
+
+var SHEET_USUARIOS = 'Usuarios';
+var SHEET_SESSOES = 'Sessoes';
+var SHEET_POPS = 'POPs';
+var SHEET_LEITURAS = 'Leituras';
+var SHEET_PARAMETROS = 'Parametros';
+var SHEET_AUDITORIA = 'Auditoria';
+/** Logs mínimos da trilha colaborativa de POP (sem dashboard). */
+var SHEET_LOGS_FLUXO = 'LogsFluxo';
+/** Opcional: execuções operacionais para o dashboard C2 (MVP). Se a aba não existir, retorna []. */
+var SHEET_EXECUCOES = 'execucoes';
+
+var SESSION_TTL_HOURS = 12;
+
+/** Logs temporários de POP (Execuções do Apps Script). Desative após estabilizar. */
+var POP_DIAG_LOG = true;
+
+/** Última leitura da biblioteca (para comparar start vs end vs getPortalData em um único bloco). */
+var POP_LAST_LIST_TRIAGE_ = null;
+
+function popDiagLog_(tag, payload) {
+  if (!POP_DIAG_LOG) return;
+  try {
+    Logger.log('[POP_DIAG:' + tag + '] ' + JSON.stringify(payload));
+  } catch (e) {
+    Logger.log('[POP_DIAG:' + tag + '] (payload não serializável)');
+  }
+}
+
+/** Um bloco só: 1) rawRows 2) pops após canView 3) pops no portal — evidência para os 3 cenários. */
+function popTriageCompareLog_(endpointTag, portalPopsReturned) {
+  if (!POP_DIAG_LOG) return;
+  var t = POP_LAST_LIST_TRIAGE_;
+  if (!t) {
+    popDiagLog_('POP_TRIAGE_COMPARE', { endpoint: endpointTag, error: 'POP_LAST_LIST_TRIAGE_ vazio (listPopsForUser_ não rodou?)' });
+    return;
+  }
+  var r0 = t.rawRows === 0;
+  var lib0 = t.popsReturned === 0;
+  var scenario = 'C0_INDEFINIDO';
+  if (r0) scenario = 'C1_RAWROWS_ZERO_BASE_SPREADSHEET_ABA_DEPLOY';
+  else if (lib0) scenario = 'C2_RAW_OK_LIBRARY_ZERO_CANVIEW_NORMALIZE_STATUS';
+  else if (portalPopsReturned !== t.popsReturned) scenario = 'ANOMALIA_LIST_END_VS_PORTAL_LEN';
+  else scenario = 'C2B_SERVER_LIBRARY_OK_SE_UI_VAZIA_ENTAO_C3_FRONTEND_FILTROS';
+
+  popDiagLog_('POP_TRIAGE_COMPARE', {
+    endpoint: endpointTag,
+    scenario: scenario,
+    bloco1_listPopsForUser_start_rawRows: t.rawRows,
+    bloco2_listPopsForUser_end_popsReturned: t.popsReturned,
+    bloco3_endpoint_popsReturned: portalPopsReturned,
+    listEnd_equals_portal: t.popsReturned === portalPopsReturned,
+    afterNormalize: t.afterNormalize,
+    droppedByCanView: t.dropped,
+    normalizeErrors: t.normalizeErrors,
+    rowsLostBeforeCanView: t.rowsLostBeforeCanView,
+    dropReasonHistogram: t.dropReasonHistogram,
+    dominantDropReason: t.dominantDropReason,
+    spreadsheetId: SPREADSHEET_ID,
+    sheet: SHEET_POPS,
+    userPerfil: t.userPerfil,
+    userId: t.userId,
+  });
+}
+
+function dominantKeyInHistogram_(hist) {
+  if (!hist) return null;
+  var best = null;
+  var bestN = 0;
+  Object.keys(hist).forEach(function (k) {
+    if (hist[k] > bestN) {
+      bestN = hist[k];
+      best = k;
+    }
+  });
+  return best;
+}
+
+// =============================================================================
+// Web app
+// =============================================================================
+
+function doGet() {
+  ensureSchema_();
+  return HtmlService.createHtmlOutputFromFile('Index')
+    .setTitle('Portal de POPs — Drogarias Conceito')
+    .setXFrameOptionsMode(HtmlService.XFrameOptionsMode.ALLOWALL);
+}
+
+function getConfig() {
+  return { logoUrl: LOGO_URL };
+}
+
+function debugAuthorizeUrlFetch() {
+  var key = PropertiesService.getScriptProperties().getProperty('OPENAI_API_KEY');
+  Logger.log(key ? 'KEY OK' : 'KEY MISSING');
+
+  var resp = UrlFetchApp.fetch('https://www.google.com/generate_204', {
+    muteHttpExceptions: true
+  });
+
+  Logger.log('URLFETCH OK status=' + resp.getResponseCode());
+  return {
+    key: key ? 'KEY OK' : 'KEY MISSING',
+    urlFetchStatus: resp.getResponseCode()
+  };
+}
+
+// =============================================================================
+// Dashboard Performance Operacional (C2) — piloto operacional (MVP)
+// Não é o C2 gerencial completo (gravidade, repetição, tendência ainda limitados).
+// =============================================================================
+
+/** Última leitura da aba execucoes — só para log do endpoint C2. */
+var __c2LastBuscaExecucoes_ = { sheetPresent: false, rowCount: 0, listError: null };
+
+/**
+ * Contrato da aba `execucoes` (SHEET_EXECUCOES) — documentação; o piloto não exige colunas extra.
+ *
+ * Obrigatório (mínimo esperado para o fluxo operacional):
+ *   - popId
+ *   - avaliadoId
+ *   - score
+ *   - dataHora
+ *   - itensJson
+ *   - modoPop
+ *
+ * Opcional aceito:
+ *   - execucaoId, popTitulo, avaliadoNome, perfil, cargo, avaliadorId, tipo, flagCritica,
+ *     statusExecucao, lojaId, lojaNome
+ *
+ * Observação: `tipo` é opcional no piloto atual; é recomendado para compatibilidade futura.
+ *
+ * Leitura: SpreadsheetApp.openById(SPREADSHEET_ID) — mesmo padrão do restante do sistema (Web App: nunca getActive).
+ * Não lança: aba ausente, vazia ou cabeçalho incompleto → [].
+ */
+function buscarExecucoes_() {
+  __c2LastBuscaExecucoes_ = { sheetPresent: false, rowCount: 0, listError: null };
+  try {
+    var ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+    var sh = ss.getSheetByName(SHEET_EXECUCOES);
+    if (!sh) return [];
+    __c2LastBuscaExecucoes_.sheetPresent = true;
+    if (sh.getLastRow() < 1) return [];
+    try {
+      var rows = listRows_(sh);
+      __c2LastBuscaExecucoes_.rowCount = rows.length;
+      return rows;
+    } catch (eList) {
+      __c2LastBuscaExecucoes_.listError = String(eList && eList.message ? eList.message : eList);
+      try {
+        Logger.log('[C2][buscarExecucoes_] listRows falhou: ' + __c2LastBuscaExecucoes_.listError);
+      } catch (e3) {}
+      return [];
+    }
+  } catch (e) {
+    try {
+      Logger.log('[C2][buscarExecucoes_] ' + String(e && e.message ? e.message : e));
+    } catch (e2) {}
+    return [];
+  }
+}
+
+/** @param execucoes {Array|undefined} linhas já filtradas no período (ou []). */
+function gerarResumoFallback_(periodoDias, execucoes) {
+  var pd = Number(periodoDias);
+  if (pd !== 7 && pd !== 30) pd = 15;
+  var total = (execucoes || []).length;
+  return {
+    periodoDias: pd,
+    totalExecucoes: total,
+    total_execucoes: total,
+    motorVersao: 'piloto_mvp',
+    statusGlobal: total === 0 ? 'amostragem_insuficiente' : 'normal',
+    motivoStatusGlobal:
+      total === 0
+        ? 'Sem execuções no período'
+        : 'Piloto operacional (MVP): métricas mínimas — não substitui o C2 gerencial completo.',
+    adocao: {
+      totalExecucoes: total,
+    },
+    risco: {
+      scoreMedioGeral: 0,
+      taxaFalhaCriticaGeral: 0,
+      percentualPopsCriticos: 0,
+      totalFalhasCriticas: 0,
+    },
+  };
+}
+
+function c2MergeResumoSeguro_(resumo, execucoesValidas, periodoDias) {
+  var fb = gerarResumoFallback_(periodoDias, execucoesValidas || []);
+  if (!resumo || typeof resumo !== 'object') return fb;
+  if (resumo.totalExecucoes == null && resumo.total_execucoes == null) {
+    resumo.totalExecucoes = fb.totalExecucoes;
+    resumo.total_execucoes = fb.total_execucoes;
+  }
+  if (!resumo.motorVersao) resumo.motorVersao = fb.motorVersao;
+  resumo.periodoDias = fb.periodoDias;
+  return resumo;
+}
+
+function c2NormalizeDashboardData_(d, periodoDias) {
+  d = d || {};
+  var fb = gerarResumoFallback_(periodoDias, []);
+  var v1 = d.c2v1 && typeof d.c2v1 === 'object' ? d.c2v1 : {};
+  return {
+    resumo: d.resumo && typeof d.resumo === 'object' ? d.resumo : fb,
+    alertas: Array.isArray(d.alertas) ? d.alertas : [],
+    colaboradores: Array.isArray(d.colaboradores) ? d.colaboradores : [],
+    pops: Array.isArray(d.pops) ? d.pops : [],
+    itens: Array.isArray(d.itens) ? d.itens : [],
+    atualizadoEm: d.atualizadoEm || new Date().toISOString(),
+    c2v1: {
+      popsSemExecucao7d: Array.isArray(v1.popsSemExecucao7d) ? v1.popsSemExecucao7d : [],
+      colaboradoresCriticos7d: Array.isArray(v1.colaboradoresCriticos7d) ? v1.colaboradoresCriticos7d : [],
+      gerentesSemAtividade7d: Array.isArray(v1.gerentesSemAtividade7d) ? v1.gerentesSemAtividade7d : [],
+    },
+  };
+}
+
+function c2LogDashboardLine_(parts) {
+  try {
+    Logger.log('[C2] ' + parts.join(' '));
+  } catch (e) {}
+}
+
+/**
+ * Primeiro valor não vazio entre colunas de data/hora da execução (piloto C2).
+ * dataHora primeiro — contrato da aba execucoes.
+ */
+function c2DashboardRawDataExecucao_(ex) {
+  var keys = [
+    ex.dataHora,
+    ex.DataHora,
+    ex.datahora,
+    ex.dataExecucao,
+    ex.data,
+    ex.quando,
+    ex.timestamp,
+    ex.createdAt,
+    ex.criadoEm,
+  ];
+  for (var i = 0; i < keys.length; i++) {
+    var v = keys[i];
+    if (v !== '' && v !== null && v !== undefined) return v;
+  }
+  return null;
+}
+
+/**
+ * Converte valor de data/hora da execução (Sheets Date, serial, ISO, YYYY-MM-DD, YYYY-MM-DD HH:mm:ss).
+ * Não altera parseDateSafe_ global — uso restrito ao dashboard de execuções.
+ */
+function parseDateExecucao_(value) {
+  if (value === '' || value === null || value === undefined) return null;
+  if (Object.prototype.toString.call(value) === '[object Date]') {
+    return isNaN(value.getTime()) ? null : value;
+  }
+  if (typeof value === 'number' && !isNaN(value)) {
+    if (value > 1e12) {
+      var dm = new Date(value);
+      return isNaN(dm.getTime()) ? null : dm;
+    }
+    if (value > 1e9 && value < 1e12) {
+      var ds = new Date(value * 1000);
+      return isNaN(ds.getTime()) ? null : ds;
+    }
+    if (value > 0 && value <= 600000) {
+      var dser = new Date((value - 25569) * 86400 * 1000);
+      return isNaN(dser.getTime()) ? null : dser;
+    }
+    var dflt = new Date(value);
+    return isNaN(dflt.getTime()) ? null : dflt;
+  }
+  var s = String(value).trim();
+  if (!s) return null;
+  var d = new Date(s);
+  if (!isNaN(d.getTime())) return d;
+  var m = s.match(/^(\d{4})-(\d{2})-(\d{2})[\sT](\d{1,2}):(\d{2})(?::(\d{2}))?/);
+  if (m) {
+    var sec = m[6] != null ? Number(m[6]) : 0;
+    var dLocal = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]), Number(m[4]), Number(m[5]), sec);
+    return isNaN(dLocal.getTime()) ? null : dLocal;
+  }
+  m = s.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (m) {
+    var dDay = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
+    return isNaN(dDay.getTime()) ? null : dDay;
+  }
+  return null;
+}
+
+function c2DashboardDataCamposFiltro_(ex) {
+  return parseDateExecucao_(c2DashboardRawDataExecucao_(ex));
+}
+
+/** Corte do período — alinhado a dashboard_filtrarExecucoesValidas. */
+function c2DashboardCutPeriodo_(filtros, refNow) {
+  var dias = Number(filtros && filtros.periodoDias) || 15;
+  if (dias !== 7 && dias !== 30) dias = 15;
+  var now = refNow || new Date();
+  return { cut: new Date(now.getTime() - dias * 24 * 60 * 60 * 1000) };
+}
+
+/** Retorna true sse a linha entra no período (regra atual do dashboard). */
+function c2DashboardExecucaoPassaPeriodo_(ex, filtros, refNow) {
+  var cut = c2DashboardCutPeriodo_(filtros, refNow).cut;
+  var dt = c2DashboardDataCamposFiltro_(ex);
+  if (!dt) return false;
+  return dt >= cut;
+}
+
+/**
+ * Só para log: quando c2DashboardDataCamposFiltro_ falha, primeiro motivo do contrato piloto
+ * (ordem fixa) ou data_hora_invalida — não altera o filtro.
+ */
+function c2PilotoMotivoQuandoDataFiltroAusente_(ex) {
+  if (!String(ex.execucaoId || ex.execucao_id || ex.id || '').trim()) return 'execucao_ausente';
+  if (!String(ex.modoPop || ex.modo_pop || '').trim()) return 'modo_pop_invalido';
+  if (!String(ex.popId || ex.codigoPop || ex.popCodigo || ex.numero || ex.codigo || '').trim()) return 'pop_id_ausente';
+  if (!String(ex.avaliadoId || ex.avaliado_id || ex.colaboradorId || '').trim()) return 'avaliado_id_ausente';
+  var dtAmplo = parseDateExecucao_(c2DashboardRawDataExecucao_(ex));
+  if (dtAmplo) return 'data_hora_invalida';
+  var sc = ex.score;
+  if (sc === '' || sc === null || sc === undefined) return 'score_invalido';
+  if (isNaN(Number(sc))) return 'score_invalido';
+  var ij = ex.itensJson;
+  if (ij === '' || ij === null || ij === undefined) return 'itens_invalidos';
+  var parsed = safeJsonParse_(ij);
+  if (parsed == null || Object.prototype.toString.call(parsed) !== '[object Array]') return 'itens_invalidos';
+  return 'data_hora_invalida';
+}
+
+/** Só para log: aceita = mesma decisão de c2DashboardExecucaoPassaPeriodo_. */
+function c2DashboardMotivoLinhaParaLog_(ex, filtros, refNow) {
+  var raw = c2DashboardRawDataExecucao_(ex);
+  var cut = c2DashboardCutPeriodo_(filtros, refNow).cut;
+  var dt = parseDateExecucao_(raw);
+  if (!dt) {
+    if (raw !== null && raw !== undefined && raw !== '') {
+      return { aceita: false, motivo: 'data_hora_invalida', valorBruto: raw };
+    }
+    return { aceita: false, motivo: c2PilotoMotivoQuandoDataFiltroAusente_(ex), valorBruto: null };
+  }
+  if (dt < cut) return { aceita: false, motivo: 'fora_do_periodo', valorBruto: null };
+  return { aceita: true, motivo: 'valida', valorBruto: null };
+}
+
+function c2ExecDiagId_(idx) {
+  var n = idx + 1;
+  var s = String(n);
+  if (s.length < 3) s = ('000' + s).slice(-3);
+  return 'exec_' + s;
+}
+
+/** Log de invalidação por linha (piloto C2); não muda regra de negócio. */
+function c2LogInvalidacaoExecucoes_(execucoesBrutas, filtros, refNow) {
+  try {
+    var arr = execucoesBrutas || [];
+    var ref = refNow || new Date();
+    var acc = 0;
+    var desc = 0;
+    Logger.log('[C2][raw] linhas=' + arr.length);
+    for (var i = 0; i < arr.length; i++) {
+      var row = c2DashboardMotivoLinhaParaLog_(arr[i], filtros, ref);
+      var id = c2ExecDiagId_(i);
+      if (row.aceita) {
+        acc++;
+        Logger.log('[C2][' + id + '] valida');
+      } else {
+        desc++;
+        var invLine = '[C2][' + id + '] invalida motivo=' + row.motivo;
+        if (row.motivo === 'data_hora_invalida' && row.valorBruto != null && row.valorBruto !== '') {
+          var vb = row.valorBruto;
+          if (Object.prototype.toString.call(vb) === '[object Date]' && !isNaN(vb.getTime())) {
+            invLine += ' valorBruto=' + vb.toISOString();
+          } else {
+            var vs = String(vb).replace(/\s+/g, ' ').trim();
+            if (vs.length > 120) vs = vs.substring(0, 117) + '...';
+            invLine += ' valorBruto=' + vs;
+          }
+        }
+        Logger.log(invLine);
+      }
+    }
+    Logger.log('[C2][summary] validas=' + acc + ' descartadas=' + desc);
+  } catch (eLog) {}
+}
+
+function dashboard_filtrarExecucoesValidas(execucoesBrutas, filtros, refNow) {
+  var ref = refNow || new Date();
+  return (execucoesBrutas || []).filter(function (ex) {
+    return c2DashboardExecucaoPassaPeriodo_(ex, filtros, ref);
+  });
+}
+
+function dashboard_filtrarExecucoesPeriodoAnterior(execucoesBrutas, filtros) {
+  var dias = Number(filtros && filtros.periodoDias) || 15;
+  if (dias !== 7 && dias !== 30) dias = 15;
+  var now = new Date();
+  var endA = new Date(now.getTime() - dias * 24 * 60 * 60 * 1000);
+  var startB = new Date(now.getTime() - 2 * dias * 24 * 60 * 60 * 1000);
+  return (execucoesBrutas || []).filter(function (ex) {
+    var dt = parseDateExecucao_(c2DashboardRawDataExecucao_(ex));
+    if (!dt) return false;
+    return dt >= startB && dt < endA;
+  });
+}
+
+/** Normaliza nome de coluna da planilha para casar cabeçalhos variantes (piloto C2). */
+function c2NormalizeHeaderKey_(s) {
+  var t = String(s || '').toLowerCase().replace(/[\s_\-]/g, '');
+  try {
+    t = t.normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+  } catch (eNorm) {}
+  return t;
+}
+
+/** Primeiro valor não vazio em `obj` cuja chave case-insensitive bate com um dos aliases. */
+function c2AliasedField_(obj, aliases) {
+  if (!obj || typeof obj !== 'object') return null;
+  var map = {};
+  for (var k in obj) {
+    if (!Object.prototype.hasOwnProperty.call(obj, k)) continue;
+    map[c2NormalizeHeaderKey_(k)] = k;
+  }
+  for (var i = 0; i < aliases.length; i++) {
+    var nk = c2NormalizeHeaderKey_(aliases[i]);
+    var rk = map[nk];
+    if (rk == null) continue;
+    var v = obj[rk];
+    if (v !== '' && v !== null && v !== undefined) return v;
+  }
+  return null;
+}
+
+function c2ParseScoreNumber_(v) {
+  if (v === null || v === undefined || v === '') return NaN;
+  if (typeof v === 'number' && !isNaN(v)) return v;
+  var s = String(v).trim().replace(/\s/g, '');
+  if (s.indexOf(',') >= 0 && s.indexOf('.') < 0) s = s.replace(',', '.');
+  else if (s.indexOf(',') >= 0 && s.indexOf('.') >= 0) s = s.replace(/\./g, '').replace(',', '.');
+  var n = parseFloat(s);
+  return isNaN(n) ? NaN : n;
+}
+
+function c2PopIdExec_(ex) {
+  var v = c2AliasedField_(ex, [
+    'popId',
+    'PopId',
+    'codigoPop',
+    'popCodigo',
+    'numero',
+    'codigo',
+    'POP',
+    'idPop',
+  ]);
+  if (v != null && String(v).trim() !== '') return String(v).trim();
+  return String(ex.popId || ex.codigoPop || ex.popCodigo || ex.numero || ex.codigo || '—').trim();
+}
+
+function c2ChaveColaboradorEx_(ex) {
+  var id = c2AliasedField_(ex, ['avaliadoId', 'AvaliadoId', 'avaliado_id', 'colaboradorId', 'ColaboradorId']);
+  id = id != null ? String(id).trim() : '';
+  if (id) return id;
+  var nome = c2AliasedField_(ex, ['avaliadoNome', 'Avaliado Nome', 'nomeAvaliado', 'nome_avaliado']);
+  nome = nome != null ? String(nome).trim() : '';
+  if (nome) return 'nome:' + nome;
+  id = String(ex.userId || ex.userid || ex.email || ex.usuario || '').trim();
+  if (id) return id;
+  return '—';
+}
+
+function c2NomeExibicaoColaboradorEx_(ex) {
+  var nome = c2AliasedField_(ex, [
+    'avaliadoNome',
+    'Avaliado Nome',
+    'nomeAvaliado',
+    'nome_avaliado',
+    'colaboradorNome',
+    'Colaborador Nome',
+    'nomeColaborador',
+  ]);
+  nome = nome != null ? String(nome).trim() : '';
+  if (nome) return nome;
+  nome = String(ex.colaboradorNome || ex.nome || ex.name || '').trim();
+  if (nome) return nome;
+  var id = c2AliasedField_(ex, ['avaliadoId', 'AvaliadoId', 'colaboradorId']);
+  id = id != null ? String(id).trim() : '';
+  if (id) return id;
+  id = String(ex.avaliadoId || ex.userId || ex.email || ex.usuario || '').trim();
+  if (id) return id;
+  return '—';
+}
+
+function dashboard_agruparColaboradores(execucoesValidas, execucoesAnterior) {
+  var m = {};
+  function bump(arr, field) {
+    (arr || []).forEach(function (ex) {
+      var chave = c2ChaveColaboradorEx_(ex);
+      var nome = c2NomeExibicaoColaboradorEx_(ex);
+      if (!m[chave]) m[chave] = { colaborador: nome, noPeriodo: 0, periodoAnterior: 0 };
+      else if (m[chave].colaborador === '—' && nome !== '—') m[chave].colaborador = nome;
+      m[chave][field]++;
+    });
+  }
+  bump(execucoesValidas, 'noPeriodo');
+  bump(execucoesAnterior, 'periodoAnterior');
+  return Object.keys(m).map(function (k) {
+    return m[k];
+  });
+}
+
+function dashboard_agruparPops(execucoesValidas, execucoesAnterior) {
+  var m = {};
+  function bump(arr, field) {
+    (arr || []).forEach(function (ex) {
+      var pid = c2PopIdExec_(ex);
+      if (!m[pid]) m[pid] = { pop: pid, noPeriodo: 0, periodoAnterior: 0 };
+      m[pid][field]++;
+    });
+  }
+  bump(execucoesValidas, 'noPeriodo');
+  bump(execucoesAnterior, 'periodoAnterior');
+  return Object.keys(m).map(function (k) {
+    return m[k];
+  });
+}
+
+function c2DescricoesItensDeExecucao_(ex) {
+  var raw =
+    ex.itensJson != null && ex.itensJson !== ''
+      ? ex.itensJson
+      : ex.itens_json != null && ex.itens_json !== ''
+        ? ex.itens_json
+        : c2AliasedField_(ex, ['itensJson', 'ItensJson', 'itens_json', 'itemsJson', 'checklistJson', 'Itens']);
+  var arr = Array.isArray(raw) ? raw : safeJsonParse_(raw);
+  if (!Array.isArray(arr)) return [];
+  var out = [];
+  for (var i = 0; i < arr.length; i++) {
+    var it = arr[i];
+    var d = '';
+    if (it == null) continue;
+    if (typeof it === 'string' || typeof it === 'number' || typeof it === 'boolean') d = String(it).trim();
+    else if (typeof it === 'object') {
+      var pick = c2AliasedField_(it, [
+        'descricao',
+        'Descricao',
+        'descrição',
+        'texto',
+        'titulo',
+        'item',
+        'passo',
+        'conteudo',
+        'nome',
+        'label',
+      ]);
+      d = pick != null ? String(pick).trim() : '';
+    }
+    if (d) out.push(d);
+  }
+  return out;
+}
+
+function dashboard_agruparItens(execucoesValidas, execucoesAnterior) {
+  var m = {};
+  function bump(arr, field) {
+    (arr || []).forEach(function (ex) {
+      var descs = c2DescricoesItensDeExecucao_(ex);
+      if (descs.length) {
+        descs.forEach(function (d) {
+          if (!m[d]) m[d] = { item: d, noPeriodo: 0, periodoAnterior: 0 };
+          m[d][field]++;
+        });
+      } else {
+        var fb = String(ex.itemId || ex.item || ex.etapa || ex.descricaoItem || ex.checklistItem || '').trim();
+        if (!fb) fb = '(sem item no JSON)';
+        if (!m[fb]) m[fb] = { item: fb, noPeriodo: 0, periodoAnterior: 0 };
+        m[fb][field]++;
+      }
+    });
+  }
+  bump(execucoesValidas, 'noPeriodo');
+  bump(execucoesAnterior, 'periodoAnterior');
+  return Object.keys(m).map(function (k) {
+    return m[k];
+  });
+}
+
+function c2FlagCriticaExecucao_(ex) {
+  var v = ex.flagCritica;
+  if (v === undefined || v === null || v === '') v = ex.flag_critica;
+  if (v === undefined || v === null || v === '')
+    v = c2AliasedField_(ex, [
+      'flagCritica',
+      'FlagCritica',
+      'flag_critica',
+      'FalhaCritica',
+      'falha_critica',
+      'Critica',
+      'critico',
+      'Criticidade',
+    ]);
+  if (v === undefined || v === null || v === '') return false;
+  if (v === true || v === 1) return true;
+  if (v === false || v === 0) return false;
+  var s = String(v).trim().toLowerCase();
+  return (
+    s === 'true' ||
+    s === '1' ||
+    s === 'sim' ||
+    s === 'yes' ||
+    s === 'verdadeiro' ||
+    s === 'v' ||
+    s === 'x' ||
+    s === 'critica' ||
+    s === 'crítica' ||
+    s === 'critico' ||
+    s === 'crítico'
+  );
+}
+
+/** Piloto C2: status coerente com risco (0–1 nas taxas). */
+function c2PilotoStatusEMotivo_(risco, nExec) {
+  if (!nExec) {
+    return {
+      statusGlobal: 'amostragem_insuficiente',
+      motivoStatusGlobal: 'Sem execuções no período',
+    };
+  }
+  var tc = Number(risco && risco.taxaFalhaCriticaGeral);
+  if (isNaN(tc)) tc = 0;
+  if (tc > 1) tc = tc / 100;
+  var pp = Number(risco && risco.percentualPopsCriticos);
+  if (isNaN(pp)) pp = 0;
+  if (pp > 1) pp = pp / 100;
+  var sm = Number(risco && risco.scoreMedioGeral);
+  if (isNaN(sm)) sm = 0;
+
+  if (tc >= 0.5 || pp >= 0.5 || sm < 40) {
+    return {
+      statusGlobal: 'critico',
+      motivoStatusGlobal:
+        'Taxa elevada de falha crítica e/ou POPs críticos no período, ou score médio muito baixo — priorizar revisão operacional.',
+    };
+  }
+  if (tc >= 0.2 || pp >= 0.2 || sm < 55) {
+    return {
+      statusGlobal: 'atencao',
+      motivoStatusGlobal:
+        'Indicadores de risco no período (falhas críticas, POPs críticos ou score) — recomenda-se monitoramento.',
+    };
+  }
+  return {
+    statusGlobal: 'normal',
+    motivoStatusGlobal:
+      'Piloto operacional (MVP): métricas dentro de faixa moderada no período — manter acompanhamento.',
+  };
+}
+
+function dashboard_calcularResumo(ctx) {
+  var pd = Number(ctx && ctx.periodoDias);
+  if (pd !== 7 && pd !== 30) pd = 15;
+  var ev = ctx.execucoes || [];
+  var n = ev.length;
+  var base = gerarResumoFallback_(pd, ev);
+  base.totalExecucoes = n;
+  base.total_execucoes = n;
+  if (base.adocao) base.adocao.totalExecucoes = n;
+  base.popsAvaliados = (ctx.pops || []).length;
+  base.itensDistintos = (ctx.itens || []).length;
+  base.colaboradoresComExecucao = (ctx.colaboradores || []).filter(function (c) {
+    return c.noPeriodo > 0;
+  }).length;
+
+  var somaScore = 0;
+  var qScore = 0;
+  var crit = 0;
+  var popsCriticos = {};
+  for (var i = 0; i < n; i++) {
+    var ex = ev[i];
+    var scRaw = c2AliasedField_(ex, ['score', 'Score', 'pontuacao', 'Pontuacao', 'nota', 'Nota', 'pontuacaoFinal']);
+    var num = c2ParseScoreNumber_(scRaw);
+    if (!isNaN(num)) {
+      somaScore += num;
+      qScore++;
+    }
+    if (c2FlagCriticaExecucao_(ex)) {
+      crit++;
+      var pid = c2PopIdExec_(ex);
+      if (pid && pid !== '—') popsCriticos[pid] = true;
+    }
+  }
+  if (!base.risco) base.risco = {};
+  base.risco.scoreMedioGeral = qScore ? somaScore / qScore : 0;
+  base.risco.taxaFalhaCriticaGeral = n ? crit / n : 0;
+  base.risco.totalFalhasCriticas = crit;
+
+  var popsAg = ctx.pops || [];
+  var popsComExec = popsAg.filter(function (p) {
+    return (p.noPeriodo || 0) > 0;
+  });
+  var nPops = popsComExec.length;
+  var nPopsCrit = 0;
+  for (var pi = 0; pi < nPops; pi++) {
+    var pk = String(popsComExec[pi].pop != null ? popsComExec[pi].pop : '').trim();
+    if (pk && popsCriticos[pk]) nPopsCrit++;
+  }
+  base.risco.percentualPopsCriticos = nPops ? nPopsCrit / nPops : 0;
+
+  var st = c2PilotoStatusEMotivo_(base.risco, n);
+  base.statusGlobal = st.statusGlobal;
+  base.motivoStatusGlobal = st.motivoStatusGlobal;
+
+  return base;
+}
+
+function dashboard_gerarAlertas(ctx) {
+  var alertas = [];
+  var r = ctx.resumo || {};
+  var total = Number(r.totalExecucoes != null ? r.totalExecucoes : r.total_execucoes);
+  if (isNaN(total)) total = 0;
+  if (total === 0) {
+    alertas.push({
+      tipo: 'amostragem',
+      mensagem: 'Sem execuções no período selecionado.',
+      severity: 'info',
+    });
+    return alertas;
+  }
+  (ctx.colaboradores || []).forEach(function (c) {
+    if (c.noPeriodo === 0 && c.periodoAnterior > 0) {
+      alertas.push({
+        tipo: 'queda',
+        mensagem: 'Colaborador ' + c.colaborador + ': execuções caíram em relação ao período anterior.',
+        severity: 'warning',
+      });
+    }
+  });
+  if ((ctx.pops || []).length === 0) {
+    alertas.push({
+      tipo: 'vinculo',
+      mensagem: 'Há execuções, mas nenhum POP foi agregado (confira colunas popId/codigo na aba execucoes).',
+      severity: 'warning',
+    });
+  }
+
+  var risk = r.risco && typeof r.risco === 'object' ? r.risco : {};
+  var tf = Number(risk.totalFalhasCriticas);
+  if (isNaN(tf)) tf = 0;
+  var pctPop = Number(risk.percentualPopsCriticos);
+  if (isNaN(pctPop)) pctPop = 0;
+  if (pctPop > 1) pctPop = pctPop / 100;
+  if (tf > 0) {
+    alertas.push({
+      tipo: 'critica',
+      mensagem:
+        'Falha crítica detectada no período (' +
+        tf +
+        ' execução(ões)) — revisar causas e ações corretivas.',
+      severity: 'warning',
+    });
+  }
+  if (pctPop > 0) {
+    alertas.push({
+      tipo: 'pop_critico',
+      mensagem:
+        'POP crítico no período: ' +
+        (pctPop * 100).toFixed(0) +
+        '% dos POPs com atividade tiveram execução marcada como crítica.',
+      severity: 'warning',
+    });
+  }
+
+  return alertas;
+}
+
+function c2AvaliadorChaveEx_(ex) {
+  var id = c2AliasedField_(ex, ['avaliadorId', 'AvaliadorId', 'avaliador_id', 'gestorId', 'GerenteId', 'gerenteId']);
+  id = id != null ? String(id).trim() : '';
+  if (id) return id;
+  return String(ex.avaliadorId || ex.gestorId || ex.gerenteId || '').trim();
+}
+
+/** Índice leve de usuários (id/código) para resolver perfil em linhas de execução. */
+function c2BuildUsuarioIndexPorSessao_() {
+  var users = listRows_(getSheet_(SHEET_USUARIOS)) || [];
+  var out = { users: users, cache: {} };
+  out.get = function (chave) {
+    var k = String(chave || '').trim();
+    if (!k) return null;
+    if (this.cache[k]) return this.cache[k];
+    var found = null;
+    for (var i = 0; i < this.users.length; i++) {
+      var row = this.users[i];
+      var id = String(row.id || row.userId || '').trim();
+      var cod = String(row.codigo != null && row.codigo !== '' ? row.codigo : '').trim();
+      if (sameUsuarioId_(id, k) || (cod && sameUsuarioId_(cod, k))) {
+        found = row;
+        break;
+      }
+    }
+    if (found) this.cache[k] = found;
+    return found || null;
+  };
+  return out;
+}
+
+function c2PerfilChaveUsuario_(idx, chave) {
+  var u = idx.get(chave);
+  if (!u) return null;
+  return normalizePerfil_(u.perfil);
+}
+
+function c2AvaliadoIdPrincipalEx_(ex) {
+  var v = c2AliasedField_(ex, ['avaliadoId', 'AvaliadoId', 'avaliado_id', 'colaboradorId', 'ColaboradorId']);
+  if (v != null && String(v).trim()) return String(v).trim();
+  return String(ex.avaliadoId || ex.colaboradorId || '').trim();
+}
+
+/**
+ * Chaves não vazias em execuções têm de existir na folha Usuarios (id ou codigo alinhados ao que grava em execucoes).
+ * Isto é regra de dado: sem correspondência não inferimos perfil nem expandimos acesso — a linha fica de fora do
+ * dashboard para não-diretor (comportamento conservador). Corrigir IDs na base restaura a leitura operacional.
+ * Diretor não passa por esta verificação.
+ */
+function dashboard_execucaoChavesResolvemUsuarios_(ex, idx) {
+  var a = c2AvaliadoIdPrincipalEx_(ex);
+  var g = c2AvaliadorChaveEx_(ex);
+  if (a && !idx.get(a)) return false;
+  if (g && !idx.get(g)) return false;
+  return true;
+}
+
+/**
+ * Colaborador: só execuções ligadas ao próprio utilizador (avaliado ou avaliador).
+ * Gerente: piso (perfis operacionais) + próprias avaliações; exclui avaliações atribuíveis à diretoria.
+ * Diretor: tudo.
+ */
+function dashboard_execucaoVisivelParaUsuario_(ex, viewer, idx) {
+  var p = normalizePerfil_(viewer && viewer.perfil);
+  var myId = String(viewer && (viewer.id || viewer.userId) || '').trim();
+  if (!myId) return false;
+  if (p === 'diretor' || p === 'diretoria') return true;
+  if (!dashboard_execucaoChavesResolvemUsuarios_(ex, idx)) return false;
+
+  var aidChave = c2AvaliadorChaveEx_(ex);
+  var avaliadoChave = c2AvaliadoIdPrincipalEx_(ex);
+
+  if (p === 'atendente' || p === 'farmaceutico' || p === 'entregador') {
+    if (avaliadoChave && sameUsuarioId_(avaliadoChave, myId)) return true;
+    if (aidChave && sameUsuarioId_(aidChave, myId)) return true;
+    return false;
+  }
+
+  if (p === 'gerente') {
+    var perfAvaliador = aidChave ? c2PerfilChaveUsuario_(idx, aidChave) : null;
+    if (perfAvaliador === 'diretor' || perfAvaliador === 'diretoria') return false;
+    if (aidChave && sameUsuarioId_(aidChave, myId)) return true;
+    var perfAvaliado = avaliadoChave ? c2PerfilChaveUsuario_(idx, avaliadoChave) : null;
+    if (perfAvaliado === 'atendente' || perfAvaliado === 'farmaceutico' || perfAvaliado === 'entregador') return true;
+    if (perfAvaliador === 'atendente' || perfAvaliador === 'farmaceutico' || perfAvaliador === 'entregador') return true;
+    return false;
+  }
+
+  return false;
+}
+
+function dashboard_filtrarExecucoesGovernanca_(execs, viewer) {
+  if (!Array.isArray(execs)) return [];
+  var idx = c2BuildUsuarioIndexPorSessao_();
+  return execs.filter(function (ex) {
+    return dashboard_execucaoVisivelParaUsuario_(ex, viewer, idx);
+  });
+}
+
+function c2v1CatalogoPopsCriticosVigentes_() {
+  try {
+    ensureSchema_();
+    var rows = listRows_(getSheet_(SHEET_POPS));
+    var out = [];
+    (rows || []).forEach(function (r) {
+      var p = normalizePopRow_(r);
+      if (p.tipo !== 'critico') return;
+      if (String(p.status) !== 'vigente') return;
+      if (!String(p.popId || '').trim()) return;
+      out.push({ popId: String(p.popId).trim(), numero: String(p.numero || '').trim(), titulo: String(p.titulo || 'POP sem título') });
+    });
+    return out;
+  } catch (eCat) {
+    return [];
+  }
+}
+
+function c2v1ExecAssociaPopCritico_(ex, pop) {
+  var pid = c2PopIdExec_(ex);
+  if (!pid || pid === '—') return false;
+  if (String(pid) === String(pop.popId || '').trim()) return true;
+  if (pop.numero && String(pid) === String(pop.numero).trim()) return true;
+  return false;
+}
+
+/**
+ * C2 v1 — listas adicionais (sempre janela 7 dias, só POPs tipo crítico vigentes). Não altera o motor piloto existente.
+ * @param {Array|undefined} optPopCatalog — se definido, restringe o catálogo (governança de saída sem refatorar agregadores).
+ */
+function c2v1ComputeAll_(execucoesBrutas, refNow, optPopCatalog) {
+  var empty = { popsSemExecucao7d: [], colaboradoresCriticos7d: [], gerentesSemAtividade7d: [] };
+  try {
+    var ref = refNow || new Date();
+    var popCatalog =
+      optPopCatalog != null && Array.isArray(optPopCatalog) ? optPopCatalog : c2v1CatalogoPopsCriticosVigentes_();
+    if (!popCatalog.length) return empty;
+
+    var filtros7 = { periodoDias: 7 };
+    var cut7 = c2DashboardCutPeriodo_(filtros7, ref).cut;
+
+    var execsCrit7 = (execucoesBrutas || []).filter(function (ex) {
+      if (!c2DashboardExecucaoPassaPeriodo_(ex, filtros7, ref)) return false;
+      for (var i = 0; i < popCatalog.length; i++) {
+        if (c2v1ExecAssociaPopCritico_(ex, popCatalog[i])) return true;
+      }
+      return false;
+    });
+
+    var lastMsByPopId = {};
+    popCatalog.forEach(function (p) {
+      lastMsByPopId[p.popId] = null;
+    });
+    (execucoesBrutas || []).forEach(function (ex) {
+      var dt = c2DashboardDataCamposFiltro_(ex);
+      if (!dt) return;
+      var t = dt.getTime();
+      for (var j = 0; j < popCatalog.length; j++) {
+        var p = popCatalog[j];
+        if (!c2v1ExecAssociaPopCritico_(ex, p)) continue;
+        var cur = lastMsByPopId[p.popId];
+        if (cur == null || t > cur) lastMsByPopId[p.popId] = t;
+        break;
+      }
+    });
+
+    var popsSem = [];
+    popCatalog.forEach(function (p) {
+      var lm = lastMsByPopId[p.popId];
+      if (lm != null && lm >= cut7.getTime()) return;
+      var diasSem;
+      var ultimaIso = '';
+      if (lm == null) {
+        diasSem = 99999;
+      } else {
+        diasSem = Math.max(0, Math.floor((ref.getTime() - lm) / 86400000));
+        ultimaIso = new Date(lm).toISOString();
+      }
+      popsSem.push({
+        nome: p.titulo,
+        diasSemExecucao: diasSem,
+        ultimaExecucao: ultimaIso || '—',
+        popId: p.popId,
+      });
+    });
+    popsSem.sort(function (a, b) {
+      return (b.diasSemExecucao || 0) - (a.diasSemExecucao || 0);
+    });
+
+    var aggCol = {};
+    execsCrit7.forEach(function (ex) {
+      var key = c2ChaveColaboradorEx_(ex);
+      var nome = c2NomeExibicaoColaboradorEx_(ex);
+      if (!aggCol[key]) aggCol[key] = { nome: nome, soma: 0, qVal: 0, qAll: 0 };
+      if (aggCol[key].nome === '—' && nome !== '—') aggCol[key].nome = nome;
+      aggCol[key].qAll++;
+      var scRaw = c2AliasedField_(ex, ['score', 'Score', 'pontuacao', 'Pontuacao', 'nota', 'Nota', 'pontuacaoFinal']);
+      var num = c2ParseScoreNumber_(scRaw);
+      if (!isNaN(num)) {
+        aggCol[key].soma += num;
+        aggCol[key].qVal++;
+      }
+    });
+    var colabCrit = [];
+    Object.keys(aggCol).forEach(function (k) {
+      var o = aggCol[k];
+      if (o.qAll < 2) return;
+      if (o.qVal < 1) return;
+      var avg = o.soma / o.qVal;
+      if (avg >= 70) return;
+      colabCrit.push({
+        nome: o.nome,
+        scoreMedio: Math.round(avg * 10) / 10,
+        numExecucoes: o.qAll,
+      });
+    });
+    colabCrit.sort(function (a, b) {
+      return (a.scoreMedio - b.scoreMedio) || (b.numExecucoes - a.numExecucoes);
+    });
+
+    var countAval = {};
+    execsCrit7.forEach(function (ex) {
+      var aid = c2AvaliadorChaveEx_(ex);
+      if (!aid) return;
+      countAval[aid] = (countAval[aid] || 0) + 1;
+    });
+    var gerentesOut = [];
+    try {
+      var users = listRows_(getSheet_(SHEET_USUARIOS));
+      (users || []).forEach(function (u) {
+        if (normalizePerfil_(u.perfil) !== 'gerente') return;
+        var uid = String(u.id || u.userId || '').trim();
+        if (!uid) return;
+        var n = Number(countAval[uid] || 0);
+        if (n !== 0) return;
+        gerentesOut.push({
+          nome: String(u.nome || u.usuario || uid).trim(),
+          numExecucoes: 0,
+          userId: uid,
+        });
+      });
+    } catch (eU) {}
+    gerentesOut.sort(function (a, b) {
+      return String(a.nome).localeCompare(String(b.nome));
+    });
+
+    return {
+      popsSemExecucao7d: popsSem,
+      colaboradoresCriticos7d: colabCrit,
+      gerentesSemAtividade7d: gerentesOut,
+    };
+  } catch (eAll) {
+    try {
+      Logger.log('[C2v1] ' + String(eAll && eAll.message ? eAll.message : eAll));
+    } catch (eL) {}
+    return empty;
+  }
+}
+
+/** Catálogo crítico-vigente reduzido aos POPs que aparecem nas execuções já governadas (evita listas globais no payload). */
+function c2v1FilterCatalogPopsPorExecucoes_(popCatalog, execsGov) {
+  if (!Array.isArray(popCatalog) || !popCatalog.length) return [];
+  if (!Array.isArray(execsGov) || !execsGov.length) return [];
+  var set = {};
+  for (var i = 0; i < execsGov.length; i++) {
+    var ex = execsGov[i];
+    for (var j = 0; j < popCatalog.length; j++) {
+      var p = popCatalog[j];
+      if (c2v1ExecAssociaPopCritico_(ex, p)) {
+        set[String(p.popId || '').trim()] = true;
+        break;
+      }
+    }
+  }
+  return popCatalog.filter(function (p) {
+    return !!set[String(p.popId || '').trim()];
+  });
+}
+
+/**
+ * c2v1: diretor usa todas as execuções (visão global). Demais perfis só agregados sobre execuções governadas
+ * e catálogo crítico intersecionado com essas linhas; nunca lista gerentesSemAtividade7d global.
+ */
+function c2v1ComputeAllParaUsuario_(execucoesBrutasFull, execucoesGovernadas, refNow, viewer) {
+  var p = normalizePerfil_(viewer && viewer.perfil);
+  if (p === 'diretor' || p === 'diretoria') {
+    return c2v1ComputeAll_(execucoesBrutasFull, refNow);
+  }
+  var popFull = c2v1CatalogoPopsCriticosVigentes_();
+  var popScoped = c2v1FilterCatalogPopsPorExecucoes_(popFull, execucoesGovernadas);
+  var out = c2v1ComputeAll_(execucoesGovernadas, refNow, popScoped);
+  out.gerentesSemAtividade7d = [];
+  return out;
+}
+
+/**
+ * Dashboard C2 (MVP): usa funções dashboard_* acima; nunca quebra o envelope esperado pelo Index.html.
+ * Requer sessão válida; dados filtrados por perfil (colaborador / gerente / diretor).
+ */
+function api_obterDashboardPerformance(sessionId, payload) {
+  var t0 = Date.now();
+  var periodoDias = 15;
+  var bruto = 0;
+  var validas = 0;
+  var sheetPresent = false;
+  var listErr = '';
+  var fallbackResumo = false;
+
+  try {
+    if (sessionId != null && typeof sessionId === 'object' && (payload === undefined || payload === null)) {
+      return fail_(
+        'AUTH_REQUIRED',
+        'Atualize o portal e faça login de novo para ver Performance Operacional (sessão obrigatória).'
+      );
+    }
+    ensureSchema_();
+    var ctxDash = requireSession_(sessionId);
+    if (!userHasPortalPermission_(ctxDash.user, 'performance_operacional')) {
+      return fail_('FORBIDDEN', 'Sem permissão para Performance Operacional.');
+    }
+
+    if (payload != null && typeof payload !== 'object') {
+      c2LogDashboardLine_(['aviso=payload_nao_objeto']);
+      payload = {};
+    } else {
+      payload = payload || {};
+    }
+    var periodoBruto = payload.periodoDias;
+    periodoDias = Number(periodoBruto);
+    if (periodoBruto != null && periodoBruto !== '' && isNaN(periodoDias)) {
+      c2LogDashboardLine_(['aviso=periodoDias_invalido_usando_15']);
+      periodoDias = 15;
+    } else if (periodoDias !== 7 && periodoDias !== 30) {
+      periodoDias = 15;
+    }
+
+    var execucoesBrutasFull = buscarExecucoes_();
+    var execucoesBrutas = dashboard_filtrarExecucoesGovernanca_(execucoesBrutasFull, ctxDash.user);
+    bruto = execucoesBrutas.length;
+    sheetPresent = !!__c2LastBuscaExecucoes_.sheetPresent;
+    listErr = __c2LastBuscaExecucoes_.listError || '';
+
+    var filtros = { periodoDias: periodoDias };
+
+    var refNowDash = new Date();
+    c2LogInvalidacaoExecucoes_(execucoesBrutas, filtros, refNowDash);
+
+    var execucoesValidas =
+      typeof dashboard_filtrarExecucoesValidas === 'function'
+        ? dashboard_filtrarExecucoesValidas(execucoesBrutas, filtros, refNowDash)
+        : [];
+    validas = execucoesValidas.length;
+
+    var execucoesAnterior =
+      typeof dashboard_filtrarExecucoesPeriodoAnterior === 'function'
+        ? dashboard_filtrarExecucoesPeriodoAnterior(execucoesBrutas, filtros)
+        : [];
+
+    var itens =
+      typeof dashboard_agruparItens === 'function' ? dashboard_agruparItens(execucoesValidas, execucoesAnterior) : [];
+
+    var colaboradores =
+      typeof dashboard_agruparColaboradores === 'function'
+        ? dashboard_agruparColaboradores(execucoesValidas, execucoesAnterior)
+        : [];
+
+    var pops =
+      typeof dashboard_agruparPops === 'function' ? dashboard_agruparPops(execucoesValidas, execucoesAnterior) : [];
+
+    var resumo;
+    if (typeof dashboard_calcularResumo === 'function') {
+      try {
+        resumo = dashboard_calcularResumo({
+          periodoDias: periodoDias,
+          execucoes: execucoesValidas,
+          itens: itens,
+          colaboradores: colaboradores,
+          pops: pops,
+        });
+      } catch (eCalc) {
+        fallbackResumo = true;
+        resumo = gerarResumoFallback_(periodoDias, execucoesValidas);
+        try {
+          Logger.log('[C2] resumo_fallback=motivo_calc erro=' + String(eCalc && eCalc.message ? eCalc.message : eCalc));
+        } catch (eL) {}
+      }
+    } else {
+      fallbackResumo = true;
+      resumo = gerarResumoFallback_(periodoDias, execucoesValidas);
+    }
+    resumo = c2MergeResumoSeguro_(resumo, execucoesValidas, periodoDias);
+
+    var alertas;
+    try {
+      alertas =
+        typeof dashboard_gerarAlertas === 'function'
+          ? dashboard_gerarAlertas({
+              resumo: resumo,
+              itens: itens,
+              colaboradores: colaboradores,
+              pops: pops,
+            })
+          : [];
+    } catch (eAlert) {
+      alertas = [];
+      try {
+        Logger.log('[C2] alertas_fallback erro=' + String(eAlert && eAlert.message ? eAlert.message : eAlert));
+      } catch (eL2) {}
+    }
+
+    if (!Array.isArray(alertas)) alertas = [];
+
+    var c2v1 = { popsSemExecucao7d: [], colaboradoresCriticos7d: [], gerentesSemAtividade7d: [] };
+    try {
+      c2v1 = c2v1ComputeAllParaUsuario_(execucoesBrutasFull, execucoesBrutas, refNowDash, ctxDash.user);
+    } catch (eV1) {
+      try {
+        Logger.log('[C2v1] compute ' + String(eV1 && eV1.message ? eV1.message : eV1));
+      } catch (eL3) {}
+    }
+
+    var dataRaw = {
+      resumo: resumo,
+      alertas: alertas,
+      colaboradores: colaboradores,
+      pops: pops,
+      itens: itens,
+      atualizadoEm: new Date().toISOString(),
+      c2v1: c2v1,
+    };
+    var data = c2NormalizeDashboardData_(dataRaw, periodoDias);
+
+    var tempoMs = Date.now() - t0;
+    c2LogDashboardLine_([
+      'periodo=' + periodoDias,
+      'bruto=' + bruto,
+      'validas=' + validas,
+      'colaboradores=' + data.colaboradores.length,
+      'pops=' + data.pops.length,
+      'itens=' + data.itens.length,
+      'fallbackResumo=' + (fallbackResumo ? 'true' : 'false'),
+      'sheetExecucoes=' + (sheetPresent ? 'sim' : 'nao'),
+      bruto > 0 && validas === 0 ? 'filtro_data_perdeu_todas=sim' : 'filtro_data_perdeu_todas=nao',
+      listErr ? 'listErr=sim' : 'listErr=nao',
+      'tempoMs=' + tempoMs,
+    ]);
+
+    if (!sheetPresent) {
+      c2LogDashboardLine_(['aviso=aba_execucoes_ausente']);
+    }
+    if (bruto === 0 && sheetPresent) {
+      c2LogDashboardLine_(['aviso=aba_execucoes_vazia_ou_so_cabecalho']);
+    }
+    if (listErr) {
+      try {
+        Logger.log('[C2] listErrDetalhe=' + String(listErr).substring(0, 200));
+      } catch (eD) {}
+    }
+
+    return { ok: true, data: data };
+  } catch (e) {
+    var tempoMsErr = Date.now() - t0;
+    try {
+      Logger.log(
+        '[C2] ERRO periodo=' +
+          periodoDias +
+          ' bruto=' +
+          bruto +
+          ' validas=' +
+          validas +
+          ' tempoMs=' +
+          tempoMsErr +
+          ' msg=' +
+          String(e && e.message ? e.message : e)
+      );
+    } catch (e2) {}
+    return {
+      ok: false,
+      message: 'Erro ao gerar dashboard',
+      erro: String(e && e.message ? e.message : e),
+    };
+  }
+}
+
+// =============================================================================
+// API (nova)
+// =============================================================================
+
+function api_login(emailOrUserOrId, senha) {
+  ensureSchema_();
+  var user = findActiveUserForLogin_(emailOrUserOrId, senha);
+  if (!user) return fail_('AUTH_INVALID', 'Usuário/ID/email ou senha inválidos.');
+
+  var session = createSession_(user);
+  logAudit_(user, 'LOGIN', 'SESSAO', session.sessionId, {});
+
+  return ok_({
+    sessionId: session.sessionId,
+    expiresAt: session.expiraEm,
+    user: publicUser_(user),
+  });
+}
+
+function api_logout(sessionId) {
+  ensureSchema_();
+  var ctx = requireSession_(sessionId);
+  revokeSession_(ctx.session.sessionId);
+  logAudit_(ctx.user, 'LOGOUT', 'SESSAO', ctx.session.sessionId, {});
+  return ok_({ ok: true });
+}
+
+function api_getMe(sessionId) {
+  ensureSchema_();
+  var ctx = requireSession_(sessionId);
+  return ok_({ user: publicUser_(ctx.user) });
+}
+
+/**
+ * Estado global do sistema (Sprint 1: já existe, mas bloqueio forte vem Sprint 4).
+ */
+function api_getSystemState(sessionId) {
+  ensureSchema_();
+  var ctx = requireSession_(sessionId);
+
+  var pendingCriticalReads = listPendingCriticalReads_(ctx.user);
+  return ok_({
+    blocked: false,
+    reason: pendingCriticalReads.length ? 'PENDING_CRITICAL_READS' : null,
+    pendingCriticalReads: pendingCriticalReads,
+  });
+}
+
+function api_listPops(sessionId, filtros) {
+  ensureSchema_();
+  var ctx = requireSession_(sessionId);
+
+  var pops = getPopsLibraryForUser_(ctx.user);
+  // Sprint 1: filtros opcionais, aplicados no backend apenas se vierem.
+  var f = filtros || {};
+  var beforeFilt = pops.length;
+  if (f.status) pops = pops.filter(function (p) { return String(p.status || '') === String(f.status); });
+  if (f.criticidade) pops = pops.filter(function (p) { return String(p.criticidade || '') === String(f.criticidade); });
+  popDiagLog_('api_listPops', {
+    spreadsheetId: SPREADSHEET_ID,
+    sheet: SHEET_POPS,
+    source: 'getPopsLibraryForUser_',
+    beforeFilters: beforeFilt,
+    popsReturned: pops.length,
+    filtros: f,
+    sample: pops.slice(0, 15).map(function (p) {
+      return { popId: p.popId, titulo: p.titulo, status: p.status };
+    }),
+  });
+  return ok_({ pops: pops });
+}
+
+function api_getPop(sessionId, popId, versaoId) {
+  ensureSchema_();
+  var ctx = requireSession_(sessionId);
+  var pop = getPopForUser_(ctx.user, popId, versaoId);
+  return ok_({ pop: pop });
+}
+
+function api_createPopDraft(sessionId, payload) {
+  ensureSchema_();
+  var ctx = requireSession_(sessionId);
+  assertCan_(ctx.user, 'POP_CREATE_DRAFT');
+
+  var created = createPopDraft_(ctx.user, payload || {});
+  logAudit_(ctx.user, 'POP_CREATE_DRAFT', 'POP', created.versaoId, auditPopDetails_(ctx.user, created, created.status));
+  return ok_({ pop: created });
+}
+
+function api_updatePopDraft(sessionId, popId, versaoId, payload) {
+  ensureSchema_();
+  var ctx = requireSession_(sessionId);
+  assertCan_(ctx.user, 'POP_EDIT_DRAFT');
+
+  var before = getPopForUser_(ctx.user, popId, versaoId);
+  var updated = updatePopDraft_(ctx.user, popId, versaoId, payload || {});
+  logAudit_(ctx.user, 'POP_UPDATE_DRAFT', 'POP', updated.versaoId, auditPopDetails_(ctx.user, before, updated.status, {
+    statusNovo: updated.status,
+    tipoNovo: normalizeTipoPop_(updated.tipo),
+    origemNova: normalizeOrigemPop_(updated.origem),
+  }));
+  return ok_({ pop: updated });
+}
+
+/**
+ * TEMPORÁRIO SPRINT 1:
+ * Marca um POP como vigente sem workflow formal. Apenas diretor.
+ * Substituir na Sprint 2 por workflow (em_aprovacao -> aprovado -> vigente).
+ */
+function api_setPopVigenteBasic(sessionId, popId, versaoId) {
+  try {
+    ensureSchema_();
+    var ctx = requireSession_(sessionId);
+    assertCan_(ctx.user, 'POP_MARK_VIGENTE_BASIC');
+
+    var before = getPopForUser_(ctx.user, popId, versaoId);
+    var pop = setPopVigenteBasic_(ctx.user, popId, versaoId);
+    logAudit_(ctx.user, 'POP_MARK_VIGENTE_BASIC', 'POP', pop.versaoId, auditPopDetails_(ctx.user, before, pop.status));
+    return ok_({ pop: pop });
+  } catch (e) {
+    var msg = String(e && e.message ? e.message : e);
+    if (e && e.popValidacaoErros) {
+      return fail_('POP_PUBLICACAO_BLOQUEADA', msg, { erros: e.popValidacaoErros });
+    }
+    return fail_('POP_MARK_VIGENTE_ERR', msg, null);
+  }
+}
+
+function api_listMyPendingReads(sessionId) {
+  ensureSchema_();
+  var ctx = requireSession_(sessionId);
+  var pending = listMyPendingReads_(ctx.user);
+  return ok_({ pending: pending });
+}
+
+function api_confirmRead(sessionId, popId, versaoId) {
+  ensureSchema_();
+  var ctx = requireSession_(sessionId);
+  var pop = getPopForUser_(ctx.user, popId, versaoId);
+  if (String(pop.status) !== 'vigente') return fail_('READ_NOT_ALLOWED', 'Leitura só pode ser confirmada para POP vigente.');
+
+  var leitura = confirmRead_(ctx.user, pop);
+  logAudit_(ctx.user, 'READ_CONFIRM', 'LEITURA', leitura.leituraId, { popId: pop.popId, versaoId: pop.versaoId, numero: pop.numero });
+  return ok_({ leitura: leitura });
+}
+
+function api_getReadStatus(sessionId, popId, versaoId) {
+  ensureSchema_();
+  var ctx = requireSession_(sessionId);
+  var pop = getPopForUser_(ctx.user, popId, versaoId);
+  var leitura = getReadForUserAndVersion_(ctx.user.userId, pop.popId, pop.versaoId);
+  return ok_({ lido: !!leitura, leitura: leitura || null });
+}
+
+// =============================================================================
+// Compat layer (para o HTML que você já tem hoje)
+// =============================================================================
+
+/**
+ * HTML atual chama login(usuario, senha) e espera:
+ * { ok, token, user, expiresAt }
+ *
+ * Retorno sempre JSON-serializável (evita res === null no google.script.run do Web App).
+ */
+function login(usuarioOuIdOuEmail, senha) {
+  try {
+    var res = api_login(usuarioOuIdOuEmail, senha);
+    if (!res || res.ok !== true) {
+      var msg = (res && res.error && res.error.message) ? String(res.error.message) : 'Usuário/ID/email ou senha inválidos.';
+      return { ok: false, message: msg };
+    }
+    var d = res.data || {};
+    var u = d.user || {};
+    var expMs = d.expiresAt instanceof Date ? d.expiresAt.getTime() : new Date(d.expiresAt).getTime();
+    var out = {
+      ok: true,
+      token: String(d.sessionId || ''),
+      expiresAt: isNaN(expMs) ? null : expMs,
+      user: {
+        id: String(u.id || u.userId || ''),
+        userId: String(u.userId || u.id || ''),
+        codigo: String(u.codigo != null && u.codigo !== '' ? u.codigo : ''),
+        email: String(u.email || ''),
+        nome: String(u.nome || ''),
+        usuario: String(u.usuario || ''),
+        perfil: String(u.perfil || ''),
+        permissions: Array.isArray(u.permissions) ? u.permissions.map(function (x) { return String(x); }) : [],
+      },
+    };
+    return JSON.parse(JSON.stringify(out));
+  } catch (e) {
+    return { ok: false, message: String((e && e.message) ? e.message : e) };
+  }
+}
+
+function logoutSession(token) {
+  // manter assinatura antiga
+  try {
+    api_logout(token);
+    return { ok: true };
+  } catch (e) {
+    return { ok: true };
+  }
+}
+
+/** Uma única leitura da biblioteca + áreas + stats (fonte de verdade partilhada). */
+function buildPortalPayloadForUser_(user) {
+  var pops = getPopsLibraryForUser_(user);
+  var areasMap = {};
+  pops.forEach(function (p) {
+    if (p.area) areasMap[p.area] = true;
+  });
+  var areas = Object.keys(areasMap).sort().map(function (nome) { return { nome: nome }; });
+  var stats = computePortalStats_(user, pops);
+  return {
+    pops: pops,
+    areas: areas,
+    stats: stats,
+    popsPortal: pops.map(toPortalPopCompat_),
+  };
+}
+
+/**
+ * Portal atual espera:
+ * { ok, areas, pops, stats }
+ */
+function getPortalData(token) {
+  var ctx = requireSession_(token);
+  if (POP_DIAG_LOG) {
+    var rawPortal = listRows_(getSheet_(SHEET_POPS));
+    popDiagLog_('getPortalData.beforeLibrary', {
+      spreadsheetId: SPREADSHEET_ID,
+      sheet: SHEET_POPS,
+      rawRows: rawPortal.length,
+      rawSample: rawPortal.slice(0, 5).map(function (row) {
+        return {
+          popId: row.popId || row.id || '',
+          titulo: row.titulo || '',
+          status: row.status == null ? '(null)' : String(row.status),
+        };
+      }),
+    });
+  }
+  var b = buildPortalPayloadForUser_(ctx.user);
+  var pops = b.pops;
+  popTriageCompareLog_('getPortalData', pops.length);
+  popDiagLog_('getPortalData', {
+    spreadsheetId: SPREADSHEET_ID,
+    sheet: SHEET_POPS,
+    popsReturned: pops.length,
+    source: 'getPopsLibraryForUser_',
+    sample: pops.slice(0, 15).map(function (p) {
+      return { popId: p.popId, titulo: p.titulo, status: p.status, area: p.area };
+    }),
+  });
+  return okCompat_({
+    areas: b.areas,
+    pops: b.popsPortal,
+    stats: b.stats,
+  });
+}
+
+/**
+ * Uma chamada: biblioteca + dashboard com a mesma lista em memória (evita divergência UI / epoch).
+ * Instrumentado por fases: qualquer falha devolve { ok:false, message: 'getPortalBundle@<fase>: …' }.
+ */
+function getPortalBundle(token) {
+  var phase = 'entrada';
+  try {
+    phase = 'requireSession_';
+    var ctx = requireSession_(token);
+    popDiagLog_('getPortalBundle.phase', { phase: phase, userId: String(ctx.user.id || ctx.user.userId || '') });
+
+    if (POP_DIAG_LOG) {
+      phase = 'diag_rawPopsSheet';
+      var rawPortal = listRows_(getSheet_(SHEET_POPS));
+      popDiagLog_('getPortalBundle.beforeLibrary', {
+        spreadsheetId: SPREADSHEET_ID,
+        sheet: SHEET_POPS,
+        rawRows: rawPortal.length,
+      });
+    }
+
+    phase = 'buildPortalPayloadForUser_';
+    var b = buildPortalPayloadForUser_(ctx.user);
+    popDiagLog_('getPortalBundle.phase', { phase: phase, popsRaw: (b.pops || []).length, areas: (b.areas || []).length });
+
+    phase = 'areas_stats_popsPortal';
+    var areas = b.areas;
+    var stats = b.stats;
+    var popsPortal = b.popsPortal;
+    popDiagLog_('getPortalBundle.phase', { phase: phase, popsPortalLen: (popsPortal || []).length });
+
+    phase = 'normalizePerfil_+fila';
+    var perfil = normalizePerfil_(ctx.user.perfil);
+    var fila = buildFilaDashboard_(ctx.user, b.pops);
+    popDiagLog_('getPortalBundle.phase', { phase: phase, perfil: perfil, filaLen: (fila || []).length });
+
+    phase = 'countActiveUsers_';
+    var nUsers = countActiveUsers_();
+
+    phase = 'safeBuildRankingConformidade_';
+    var isAdminView = perfil === 'diretor' || perfil === 'gerente';
+    var ranking = isAdminView ? safeBuildRankingConformidade_(ctx.user) : [];
+    popDiagLog_('getPortalBundle.phase', { phase: phase, rankingLen: (ranking || []).length });
+
+    phase = 'buildMeusPendentes_';
+    var meus = !isAdminView ? buildMeusPendentes_(ctx.user) : [];
+    popDiagLog_('getPortalBundle.phase', { phase: phase, meusLen: (meus || []).length });
+
+    phase = 'montarObjetoDashboard';
+    var dashboard = {
+      isAdminView: isAdminView,
+      isGerenteView: perfil === 'gerente',
+      popsNaBiblioteca: (b.pops || []).length,
+      filaAprovacao: fila,
+      metrics: {
+        popsVigentes: stats.totalVigentes,
+        popsCriticos: stats.criticosVigentes,
+        usuariosAtivos: nUsers,
+        popsEmRevisao: fila.length,
+      },
+      rankingConformidade: ranking,
+      meusPendentes: meus,
+    };
+
+    phase = 'jsonSerializeTest_payload';
+    var payload = {
+      areas: areas,
+      pops: popsPortal,
+      stats: stats,
+      dashboard: dashboard,
+    };
+    try {
+      JSON.stringify(payload);
+    } catch (se) {
+      var seMsg = String(se && se.message ? se.message : se);
+      popDiagLog_('getPortalBundle.serializeFail', { err: seMsg });
+      var pops2 = (popsPortal || []).map(function (one) {
+        try {
+          return JSON.parse(JSON.stringify(one));
+        } catch (e2) {
+          return {
+            id: one.id,
+            titulo: String(one.titulo || ''),
+            status: String(one.status || ''),
+            conteudoObj: {},
+            payload: {},
+          };
+        }
+      });
+      payload.pops = pops2;
+      phase = 'jsonSerializeTest_payload_retry';
+      try {
+        JSON.stringify(payload);
+      } catch (se2) {
+        throw new Error('serializePayload: ' + String(se2 && se2.message ? se2.message : se2) + ' (original: ' + seMsg + ')');
+      }
+    }
+
+    phase = 'popTriageCompareLog_';
+    popTriageCompareLog_('getPortalBundle', (b.pops || []).length);
+
+    phase = 'okCompat_';
+    popDiagLog_('getPortalBundle.success', { pops: (b.pops || []).length, fila: (fila || []).length });
+    return okCompat_(payload);
+  } catch (e) {
+    var msg = String(e && e.message ? e.message : e);
+    popDiagLog_('getPortalBundle.ERROR', { phase: phase, err: msg });
+    try {
+      Logger.log('[getPortalBundle] FASE=' + phase + ' ERRO=' + msg);
+    } catch (eLog) {}
+    return { ok: false, message: 'getPortalBundle@' + phase + ': ' + msg };
+  }
+}
+
+function getPopById(popId, token) {
+  var ctx = requireSession_(token);
+  var pop = getPopForUser_(ctx.user, popId, null);
+  return okCompat_({ pop: toPortalPopDetailCompat_(pop) });
+}
+
+function marcarComoLido(token, popId) {
+  var ctx = requireSession_(token);
+  var pop = getPopForUser_(ctx.user, popId, null);
+  if (String(pop.status) !== 'vigente') return { ok: false, message: 'Leitura só pode ser confirmada para POP vigente.' };
+  confirmRead_(ctx.user, pop);
+  return { ok: true, message: 'Leitura registrada com sucesso.' };
+}
+
+function publicarPop(token, popId) {
+  // Diretor publica a partir de rascunho, fila do gerente ou aprovação pendente.
+  var res = api_setPopVigenteBasic(token, popId, null);
+  if (!res.ok) {
+    var det = res.error && res.error.details;
+    return {
+      ok: false,
+      message: res.error.message,
+      code: res.error.code,
+      erros: det && det.erros ? det.erros : [],
+    };
+  }
+  return { ok: true, message: 'POP publicado como vigente.' };
+}
+
+function submeterPopAprovacao(token, popId) {
+  ensureSchema_();
+  var ctx = requireSession_(token);
+  assertCan_(ctx.user, 'POP_EDIT_DRAFT');
+  var pop = getPopForUser_(ctx.user, popId, null);
+  if (String(pop.status) !== 'rascunho') throw new Error('Somente rascunho pode ser enviado para aprovação.');
+  assertPopCamposMinimosFluxo_(pop);
+  if (normalizeTipoPop_(pop.tipo) === 'critico' && !userMayPersistPopCritico_(ctx.user)) {
+    throw new Error('Seu perfil não pode enviar POP crítico para aprovação.');
+  }
+  assertPopChangedSinceLastSubmit_(pop);
+  assertAutorDiferenteDeAprovadorCriticoFromPop_(pop);
+  var p = normalizePerfil_(ctx.user.perfil);
+  var next = (p === 'gerente' || p === 'diretor') ? 'aguardando_diretor' : 'em_aprovacao';
+  patchPopStatus_(pop.popId, pop.versaoId, next);
+  logAudit_(ctx.user, 'POP_SUBMIT', 'POP', pop.versaoId, auditPopDetails_(ctx.user, pop, next, {
+    snapshot: popRelevantSnapshot_(pop),
+  }));
+  if (normalizeTipoPop_(pop.tipo) === 'colaborativo') {
+    logFluxo_(ctx.user, {
+      acao: 'enviar_aprovacao',
+      etapa: 'aprovacao',
+      status: 'ok',
+      mensagem: String(next || ''),
+      tipo: 'colaborativo',
+      origem: String(pop.origem || 'colaborativo_gpt'),
+      popId: String(pop.popId || popId || ''),
+      payloadResumo: fluxoResumoPayloadMax500_({
+        titulo: pop.titulo,
+        area: pop.area,
+        processo: pop.processo,
+      }),
+    });
+  }
+  return {
+    ok: true,
+    message: next === 'aguardando_diretor' ? 'Enviado ao diretor para publicação.' : 'Enviado ao gerente para aprovação.',
+  };
+}
+
+function aprovarGerentePop(token, popId) {
+  ensureSchema_();
+  var ctx = requireSession_(token);
+  assertCan_(ctx.user, 'POP_APPROVE_MANAGER');
+  var pop = getPopForUser_(ctx.user, popId, null);
+  // POP crítico não passa pela fila do gerente: mensagem explícita antes do check de status (evita "não aguarda gerente" genérico).
+  if (isPopCriticoFluxo_(pop)) throw new Error('POP crítico exige aprovação da diretoria.');
+  if (String(pop.status) !== 'em_aprovacao') throw new Error('Este POP não está aguardando o gerente.');
+  assertPopCamposMinimosFluxo_(pop);
+  patchPopStatus_(pop.popId, pop.versaoId, 'aguardando_diretor');
+  logAudit_(ctx.user, 'POP_APPROVE_MGR', 'POP', pop.versaoId, auditPopDetails_(ctx.user, pop, 'aguardando_diretor'));
+  return { ok: true, message: 'Aprovado pelo gerente. Aguardando o diretor publicar.' };
+}
+
+/** Volta para rascunho antes da publicação: quem criou (ou diretor) retira da fila de aprovação para editar de novo. */
+function retomarEdicaoPop(token, popId) {
+  ensureSchema_();
+  var ctx = requireSession_(token);
+  assertCan_(ctx.user, 'POP_EDIT_DRAFT');
+  var pop = getPopForUser_(ctx.user, popId, null);
+  var st = String(pop.status || '');
+  if (['em_aprovacao', 'aguardando_diretor'].indexOf(st) < 0) {
+    return { ok: false, message: 'Só é possível retomar edição enquanto o POP aguarda aprovação do gestor ou do diretor (não vigente).' };
+  }
+  var uid = String(ctx.user.id || ctx.user.userId || '');
+  var autor = String(pop.autorUserId || '');
+  var perfil = normalizePerfil_(ctx.user.perfil);
+  if (uid !== autor && perfil !== 'diretor') {
+    return { ok: false, message: 'Apenas quem criou o POP (ou o diretor) pode retomar a edição nesta etapa.' };
+  }
+  patchPopStatus_(pop.popId, pop.versaoId, 'rascunho');
+  logAudit_(ctx.user, 'POP_RETRACT_TO_DRAFT', 'POP', pop.versaoId, auditPopDetails_(ctx.user, pop, 'rascunho'));
+  return { ok: true, message: 'POP retornado para rascunho. Ajuste e reenvie para aprovação quando estiver pronto.' };
+}
+
+function patchPopStatus_(popId, versaoId, status) {
+  var sheet = getSheet_(SHEET_POPS);
+  var rows = listRowsWithRowIndex_(sheet).map(function (x) {
+    return { rowIndex: x.rowIndex, obj: normalizePopRow_(x.obj) };
+  });
+  var match = rows.find(function (p) {
+    if (versaoId) return String(p.obj.versaoId) === String(versaoId);
+    return String(p.obj.popId) === String(popId) || String(p.obj.versaoId) === String(popId);
+  });
+  if (!match) throw new Error('POP não encontrado.');
+  applyRowPatch_(sheet, match.rowIndex, { status: normalizeStatus_(status), atualizadoEm: new Date() });
+}
+
+function normalizeTipoPop_(v) {
+  var s = String(v || '').trim().toLowerCase();
+  if (s === 'critico' || s === 'crítico') return 'critico';
+  return 'colaborativo';
+}
+
+function normalizeOrigemPop_(v) {
+  return String(v || '').trim();
+}
+
+/** Gerência e diretoria podem persistir POP com tipo crítico. */
+function userMayPersistPopCritico_(user) {
+  var p = normalizePerfil_(user && user.perfil);
+  return p === 'gerente' || p === 'diretor' || p === 'diretoria';
+}
+
+function assertTipoPopPermitido_(user, tipoNormalizado) {
+  var t = normalizeTipoPop_(tipoNormalizado);
+  if (t !== 'critico') return;
+  if (!userMayPersistPopCritico_(user)) {
+    throw new Error('Seu perfil não pode criar ou alterar POP do tipo crítico.');
+  }
+}
+
+function isCriticoProcedimentoItems_(arr) {
+  if (!Array.isArray(arr) || !arr.length) return false;
+  var x = arr[0];
+  return x != null && typeof x === 'object' && String(x.itemId || '').trim() !== '';
+}
+
+function normalizeFrequenciaCritico_(raw) {
+  var s = normalizeText_(raw)
+    .toLowerCase()
+    .replace(/-/g, '_')
+    .replace(/\s+/g, '_');
+  if (s === 'por_demanda' || s === 'pordemanda') return 'por_demanda';
+  if (s === 'diario' || s === 'diário') return 'diario';
+  if (s === 'semanal') return 'semanal';
+  return '';
+}
+
+function sanitizeOneItemCritico_(o) {
+  if (!o || typeof o !== 'object') return null;
+  var itemId = normalizeText_(o.itemId || o.id || '');
+  if (!itemId) return null;
+  var out = {
+    itemId: itemId,
+    etapa: normalizeText_(o.etapa || ''),
+    descricao: normalizeText_(o.descricao || ''),
+    acao: normalizeText_(o.acao || ''),
+    criterioAvaliacao: normalizeText_(o.criterioAvaliacao || ''),
+    tipoAvaliacao: 'binario',
+    peso: normalizeText_(o.peso != null ? String(o.peso) : ''),
+  };
+  if (Object.prototype.hasOwnProperty.call(o, 'obrigatorio')) out.obrigatorio = normalizeBoolean_(o.obrigatorio);
+  if (Object.prototype.hasOwnProperty.call(o, 'critico')) out.critico = normalizeBoolean_(o.critico);
+  return out;
+}
+
+function normalizeProcedimentoCriticoLista_(raw) {
+  if (!Array.isArray(raw)) return [];
+  var out = [];
+  for (var i = 0; i < raw.length; i++) {
+    var s = sanitizeOneItemCritico_(raw[i]);
+    if (s) out.push(s);
+  }
+  return out;
+}
+
+function mergeCriticoProcedimentoImutavelItemId_(prevList, nextList) {
+  var prev = Array.isArray(prevList) ? prevList : [];
+  var nxt = Array.isArray(nextList) ? nextList : [];
+  var prevMap = {};
+  for (var i = 0; i < prev.length; i++) {
+    var it = prev[i];
+    if (it && typeof it === 'object' && it.itemId) prevMap[String(it.itemId)] = it;
+  }
+  var out = [];
+  for (var j = 0; j < nxt.length; j++) {
+    var o = nxt[j];
+    if (!o || typeof o !== 'object') continue;
+    var nid = String(o.itemId || '').trim();
+    if (nid && prevMap[nid]) {
+      out.push(Object.assign({}, o, { itemId: prevMap[nid].itemId }));
+    } else {
+      out.push(o);
+    }
+  }
+  return out;
+}
+
+function validatePopCritico_(normalized) {
+  if (normalizeTipoPop_(normalized.tipo) !== 'critico') return;
+  var cj = normalized.conteudoJson || {};
+  var fq = normalizeFrequenciaCritico_(cj.frequencia || '');
+  if (!fq) throw new Error('POP crítico: selecione a frequência (diário, semanal ou por demanda).');
+  normalized.conteudoJson.frequencia = fq;
+  var proc = normalized.conteudoJson.procedimento;
+  if (!Array.isArray(proc) || proc.length < 1) {
+    throw new Error('POP crítico: inclua pelo menos um item avaliável em procedimento.');
+  }
+  var seen = {};
+  for (var i = 0; i < proc.length; i++) {
+    var it = proc[i];
+    if (!it || typeof it !== 'object') throw new Error('POP crítico: procedimento deve ser uma lista de itens estruturados.');
+    var id = String(it.itemId || '').trim();
+    if (!id) throw new Error('POP crítico: cada item deve ter itemId.');
+    if (seen[id]) throw new Error('POP crítico: itemId duplicado: ' + id + '.');
+    seen[id] = true;
+    if (!String(it.etapa || '').trim()) throw new Error('POP crítico: etapa obrigatória no item ' + id + '.');
+    if (!String(it.acao || '').trim()) throw new Error('POP crítico: ação obrigatória no item ' + id + '.');
+    if (!String(it.criterioAvaliacao || '').trim()) throw new Error('POP crítico: critério de avaliação obrigatório no item ' + id + '.');
+    if (String(it.tipoAvaliacao || 'binario') !== 'binario') throw new Error('POP crítico: tipoAvaliacao deve ser binario.');
+    var pe = String(it.peso != null ? it.peso : '').trim();
+    if (!pe) throw new Error('POP crítico: peso obrigatório no item ' + id + '.');
+    if (isNaN(parseFloat(pe))) throw new Error('POP crítico: peso numérico inválido no item ' + id + '.');
+    if (it.obrigatorio === undefined) throw new Error('POP crítico: campo obrigatorio obrigatório no item ' + id + '.');
+    if (it.critico === undefined) throw new Error('POP crítico: campo critico obrigatório no item ' + id + '.');
+  }
+}
+
+function assertAutorDiferenteDeAprovadorCritico_(normalized) {
+  if (normalizeTipoPop_(normalized.tipo) !== 'critico') return;
+  var cj = normalized.conteudoJson || {};
+  var a = normalizeText_(normalized.autorNome || cj.autorNome || '');
+  var ap = normalizeText_(normalized.aprovador || cj.aprovadorEsperado || '');
+  // Quando não há outro diretor disponível no cadastro, usamos um aprovador institucional explícito
+  // para não bloquear o fluxo de teste/publicação com o mesmo nome do autor.
+  if (ap && iaBagNorm_(ap).indexOf('diretoria') >= 0 && iaBagNorm_(ap).indexOf('revisao') >= 0) return;
+  if (a && ap && a.toLowerCase() === ap.toLowerCase()) {
+    throw new Error('POP crítico: criador e aprovador esperado não podem ser a mesma pessoa.');
+  }
+}
+
+function resolveAutorDisplayNameForPopCriticoGuard_(pop) {
+  var cj = pop && pop.conteudoObj ? pop.conteudoObj : {};
+  var a = normalizeText_(cj.autorNome || '');
+  if (a) return a;
+  var uid = String(pop && pop.autorUserId ? pop.autorUserId : '');
+  if (!uid) return '';
+  var users = listRows_(getSheet_(SHEET_USUARIOS));
+  var u = users.find(function (x) {
+    return String(x.id || x.userId || '') === uid;
+  });
+  return u ? normalizeText_(u.nome || u.usuario || '') : '';
+}
+
+function assertAutorDiferenteDeAprovadorCriticoFromPop_(pop) {
+  if (normalizeTipoPop_(pop.tipo) !== 'critico') return;
+  var cj = pop.conteudoObj || {};
+  var tmp = {
+    tipo: pop.tipo,
+    autorNome: resolveAutorDisplayNameForPopCriticoGuard_(pop),
+    aprovador: String(cj.aprovadorEsperado || ''),
+    conteudoJson: cj,
+  };
+  assertAutorDiferenteDeAprovadorCritico_(tmp);
+}
+
+function isColaborativoGptJsonShape_(obj) {
+  if (!obj || typeof obj !== 'object') return false;
+  if (normalizeTipoPop_(obj.tipo) === 'critico') return false;
+  if (Array.isArray(obj.procedimento) && isCriticoProcedimentoItems_(obj.procedimento)) return false;
+  var t = String(obj.tipo || '')
+    .trim()
+    .toLowerCase();
+  if (t === 'colaborativo') return true;
+  if (Array.isArray(obj.procedimento)) return true;
+  if (Object.prototype.hasOwnProperty.call(obj, 'errosComuns')) return true;
+  if (Object.prototype.hasOwnProperty.call(obj, 'pontosDeAtencao')) return true;
+  return false;
+}
+
+/** Conta etapas não vazias em procedimento (strings ou objetos com texto). */
+function countProcedimentoEtapasValidas_(proc) {
+  if (!Array.isArray(proc)) return 0;
+  var n = 0;
+  for (var i = 0; i < proc.length; i++) {
+    var x = proc[i];
+    var t = '';
+    if (x == null) continue;
+    if (typeof x === 'string' || typeof x === 'number' || typeof x === 'boolean') t = String(x);
+    else if (typeof x === 'object') {
+      t = String(x.texto || x.descricao || x.passo || x.item || x.titulo || x.conteudo || '').trim();
+    }
+    if (String(t).trim()) n++;
+  }
+  return n;
+}
+
+function validateColaborativoGptBlocking_(obj) {
+  var errs = [];
+  if (!obj || typeof obj !== 'object') {
+    errs.push('JSON inválido ou vazio');
+    return errs;
+  }
+  if (!String(obj.titulo || '').trim()) errs.push('Campo obrigatório ausente: titulo');
+  if (!String(obj.area || '').trim()) errs.push('Campo obrigatório ausente: area');
+  if (!String(obj.processo || '').trim()) errs.push('Campo obrigatório ausente: processo');
+  if (!String(obj.objetivo || '').trim()) errs.push('Campo obrigatório ausente: objetivo');
+  if (!Array.isArray(obj.procedimento)) errs.push('procedimento deve ser um array');
+  else {
+    var nEt = countProcedimentoEtapasValidas_(obj.procedimento);
+    if (nEt < 1) errs.push('procedimento deve ter pelo menos 1 etapa com conteúdo');
+  }
+  return errs;
+}
+
+function validateColaborativoGptAdvisory_(obj) {
+  var av = [];
+  if (!obj || typeof obj !== 'object') return av;
+  var ob = String(obj.objetivo || '').trim();
+  if (ob.length > 0 && ob.length < 40) av.push('Objetivo muito curto');
+  if (Array.isArray(obj.procedimento)) {
+    var nEt = countProcedimentoEtapasValidas_(obj.procedimento);
+    if (nEt > 0 && nEt < 3) av.push('Procedimento com menos de 3 itens');
+  }
+  if (!Array.isArray(obj.errosComuns) || obj.errosComuns.length === 0) av.push('Erros comuns ausentes');
+  if (!Array.isArray(obj.pontosDeAtencao) || obj.pontosDeAtencao.length === 0) av.push('Pontos de atenção ausentes');
+  return av;
+}
+
+function buildIncomingFromColaborativoGpt_(user, obj) {
+  var gov = computeGovernancaDefaults_(user);
+  return {
+    tipo: normalizeTipoPop_(obj.tipo || 'colaborativo'),
+    origem: 'colaborativo_gpt',
+    titulo: normalizeText_(obj.titulo || ''),
+    area: normalizeText_(obj.area || ''),
+    processo: normalizeText_(obj.processo || ''),
+    objetivo: normalizeText_(obj.objetivo || ''),
+    procedimento: normalizeStringArray_(obj.procedimento || []),
+    errosComuns: normalizeStringArray_(obj.errosComuns || []),
+    pontosDeAtencao: normalizeStringArray_(obj.pontosDeAtencao || []),
+    criticidade: 'media',
+    status: 'rascunho',
+    publicoAlvo: 'todos',
+    leituraObrigatoria: true,
+    treinamentoObrigatorio: true,
+    autorNome: gov.autorNome,
+    donoDocumento: gov.donoDocumento,
+    aprovador: gov.aprovadorEsperado,
+  };
+}
+
+function importarPopJson(token, jsonString) {
+  ensureSchema_();
+  var ctx = requireSession_(token);
+  assertCan_(ctx.user, 'POP_CREATE_DRAFT');
+
+  try {
+    var obj = JSON.parse(String(jsonString || ''));
+    if (normalizeTipoPop_(obj.tipo) === 'critico') {
+      logFluxo_(ctx.user, {
+        acao: 'validacao_json',
+        etapa: 'input',
+        status: 'erro',
+        mensagem: 'POP crítico não pode ser importado por JSON.',
+        tipo: 'critico',
+        origem: String(obj.origem || ''),
+        popId: '',
+        payloadResumo: fluxoResumoPayloadMax500_(obj),
+      });
+      return {
+        ok: false,
+        message: 'POP crítico não pode ser importado por JSON.',
+        blocking: ['POP crítico não utiliza a importação colaborativa por JSON.'],
+      };
+    }
+    var avisos = [];
+    var mergedIn = obj;
+    if (isColaborativoGptJsonShape_(obj)) {
+      var block = validateColaborativoGptBlocking_(obj);
+      if (block.length) {
+        logFluxo_(ctx.user, {
+          acao: 'validacao_json',
+          etapa: 'input',
+          status: 'erro',
+          mensagem: block.join(' | '),
+          tipo: 'colaborativo',
+          origem: String(obj.origem || 'colaborativo_gpt'),
+          popId: '',
+          payloadResumo: fluxoResumoPayloadMax500_(obj),
+        });
+        return { ok: false, message: block.join(' '), blocking: block };
+      }
+      avisos = validateColaborativoGptAdvisory_(obj);
+      mergedIn = buildIncomingFromColaborativoGpt_(ctx.user, obj);
+    }
+    var normalized = normalizePopJsonPayload_(ctx.user, mergedIn);
+    logFluxo_(ctx.user, {
+      acao: 'validacao_json',
+      etapa: 'preview',
+      status: 'ok',
+      mensagem: (avisos || []).join(' | '),
+      tipo: String(normalized.tipo || ''),
+      origem: String(normalized.origem || ''),
+      popId: '',
+      payloadResumo: fluxoResumoPayloadMax500_(normalized),
+    });
+    return { ok: true, data: normalized, avisos: avisos };
+  } catch (e) {
+    var msg = (e && e.message) ? String(e.message) : 'JSON inválido ou não suportado.';
+    logFluxo_(ctx.user, {
+      acao: 'erro_fluxo_colaborativo',
+      etapa: 'input',
+      status: 'erro',
+      mensagem: msg,
+      tipo: '',
+      origem: '',
+      popId: '',
+      payloadResumo: fluxoResumoPayloadMax500_(String(jsonString || '').substring(0, 800)),
+    });
+    return { ok: false, message: msg, blocking: [msg] };
+  }
+}
+
+// =============================================================================
+// Geração de POP com IA (Conceito) — prompt e contrato fixos; validação bloqueante no servidor.
+// =============================================================================
+
+var IA_POP_PROMPT_VERSAO_ = '1.1';
+
+var IA_POP_PROMPT_SISTEMA_ =
+  'Responda apenas um objeto JSON válido (sem markdown, sem texto fora do JSON). ' +
+  'O JSON deve obedecer ao contrato pedido e ser compatível com validação automática posterior (ações observáveis nas etapas, critério verificável, sem frases genéricas proibidas).\n\n' +
+  'ETAPAS (execucao.o_que_fazer):\n' +
+  '- Cada item: começa com VERBO de ação + OBJETO concreto visível na loja (prateleira, produto, gôndola, etiqueta, cliente, balcão, estoque).\n' +
+  '- Frases curtas são aceitáveis.\n' +
+  '- Evite vazio operacional: "Garantir reposição adequada", "Executar o processo de reposição".\n' +
+  '- Exemplos aceitáveis: "Verificar a prateleira e identificar falta de produto", "Repor o produto na gôndola", "Avisar o cliente sobre a reposição".\n\n' +
+  'COMO FAZER BEM (via abordagem — o que vira comportamento observável):\n' +
+  '- Simples é válido; não precisa ser sofisticado.\n' +
+  '- Inclua pelo menos UM elemento físico ou ato visível (olhar, voz, posição, prateleira, gôndola, balcão, produto).\n' +
+  '- Evite: "Fazer com atenção", "Agir com profissionalismo".\n\n' +
+  'ERRO CRÍTICO (controle.erros_graves — falha visível):\n' +
+  '- Frase simples basta.\n' +
+  '- Exemplos aceitáveis: "Deixar a prateleira vazia", "Responder sem olhar para o cliente".\n' +
+  '- Evite: "Não errar", "Evitar problemas", "Erro ruim".\n\n' +
+  'CRITÉRIO DE SUCESSO (controle.criterio_sucesso):\n' +
+  '- Deve ser VERIFICÁVEL (prazo, tempo máximo, contagem, sim/não, checklist binária, %).\n' +
+  '- Pode ser simples, ex.: "Produto reposto em até 2 minutos após identificar falta".\n\n' +
+  'CONTEXTO OPERACIONAL:\n' +
+  '- Em atendimento ao cliente: fala, tom e postura observáveis.\n' +
+  '- Em processos simples (reposição, organização, conferência): priorize CLAREZA e AÇÃO DIRETA em vez de linguagem decorativa.\n\n' +
+  'VALIDAÇÃO INTERNA (no mesmo raciocínio; uma única mensagem JSON de saída):\n' +
+  '- Verifique: (1) cada etapa com verbo+objeto observável; (2) nenhuma frase genérica proibida; (3) comportamento "certo" e primeiro erro grave são CENAS visíveis.\n' +
+  '- Se falhar qualquer item: REESCREVA o objeto JSON inteiro NO MÁXIMO UMA VEZ e devolva só a versão final.\n\n' +
+  'FORMATO LÓGICO: título, quando aplicar, 3 a 6 etapas, tempo, frequência, critério de sucesso. Preencha o contrato JSON nessa ordem de conteúdo.';
+
+/** Prompt utilizador — texto fixo da especificação; apenas processo/situacao/erro variam. */
+function buildIaPopPromptUsuario_(pIn, sIn, eIn) {
+  return [
+    'GERAR NO PADRÃO CONCEITO',
+    '',
+    'Você está gerando um POP operacional para farmácia de varejo.',
+    '',
+    'Objetivo:',
+    'Criar um procedimento executável, mensurável e aplicável no dia a dia.',
+    '',
+    'ENTRADA:',
+    '- processo:',
+    String(pIn || ''),
+    '- situacao:',
+    String(sIn || ''),
+    '- erro:',
+    String(eIn || ''),
+    '',
+    'REGRAS OBRIGATÓRIAS:',
+    '',
+    '1. PROIBIDO linguagem genérica:',
+    'Nunca use (nem variações óbvias):',
+    '- atender bem',
+    '- ser cordial / profissionalismo vazio',
+    '- fazer corretamente / fazer bem',
+    '- com atenção',
+    '- não errar / evitar problemas / agir mal / erro ruim',
+    '',
+    '2. PROCEDIMENTO (execucao.o_que_fazer):',
+    '- Cada etapa DEVE começar com VERBO de ação e conter OBJETO concreto visível na loja.',
+    '- Frases curtas são aceitáveis.',
+    '- Evite: "Garantir reposição adequada", "Executar o processo de reposição".',
+    '- Prefira estilo: "Verificar a prateleira e identificar falta de produto", "Repor o produto na gôndola", "Avisar o cliente sobre a reposição".',
+    '',
+    '3. COMO FAZER BEM (abordagem: o_que_dizer, tom, postura — tudo observável):',
+    '- Pode ser simples; inclua pelo menos UM elemento físico ou ato visível (olhar, voz, prateleira, gôndola, balcão, produto).',
+    '- Proibido: "Fazer com atenção", "Agir com profissionalismo".',
+    '',
+    '4. ERRO CRÍTICO (controle.erros_graves — 1º item = falha principal visível):',
+    '- Frase simples basta; descreva a cena errada.',
+    '- Evite abstrações: "Não errar", "Evitar problemas".',
+    '',
+    '5. CRITÉRIO DE SUCESSO e MÉTRICA (controle):',
+    '- critério de sucesso: VERIFICÁVEL (prazo, tempo máximo, contagem, sim/não, %).',
+    '- Ex.: "Produto reposto em até 2 minutos após identificar falta".',
+    '- metrica: alinhada a algo contável ou observável no período.',
+    '',
+    '6. Sempre incluir:',
+    '- tempo',
+    '- frequência',
+    '- critério de sucesso',
+    '',
+    '7. Se for atendimento ao cliente:',
+    '- incluir fala (o_que_dizer), tom e postura observáveis.',
+    '',
+    '8. Se NÃO for atendimento (reposição, organização, conferência, piso):',
+    '- priorize CLAREZA e AÇÃO DIRETA em vez de linguagem sofisticada;',
+    '- evite tom/postura subjetivos vazios; se usar postura, que seja física/posicional (ex.: "de frente à prateleira").',
+    '',
+    '9. Limite:',
+    '- mínimo 3 etapas',
+    '- máximo 6 etapas',
+    '',
+    '10. Classifique automaticamente linhaPop:',
+    '- critico → cliente, medicamento, venda, dinheiro',
+    '- operacional → rotinas internas',
+    '',
+    '11. VALIDAÇÃO INTERNA (antes de devolver o JSON; sem segunda mensagem ao utilizador):',
+    '- Confira: (a) cada etapa com verbo+objeto observável; (b) nenhuma frase genérica proibida; (c) como fazer bem e erro crítico são CENAS observáveis.',
+    '- Se falhar: reescreva o JSON COMPLETO NO MÁXIMO UMA VEZ e devolva só a versão final.',
+    '',
+    'SAÍDA:',
+    'Retornar apenas JSON válido.',
+    'Sem explicações.',
+    '',
+    'CONTRATO DE SAÍDA',
+    '',
+    '{',
+    '  "titulo": "",',
+    '  "area": "",',
+    '  "processo": "",',
+    '  "linhaPop": "",',
+    '  "execucao": {',
+    '    "o_que_fazer": [],',
+    '    "tempo": "",',
+    '    "frequencia": ""',
+    '  },',
+    '  "abordagem": {',
+    '    "o_que_dizer": [],',
+    '    "tom": "",',
+    '    "postura": ""',
+    '  },',
+    '  "controle": {',
+    '    "erros_graves": [],',
+    '    "metrica": "",',
+    '    "criterio_sucesso": ""',
+    '  },',
+    '  "contexto": {',
+    '    "quando_aplicar": "",',
+    '    "exemplo": ""',
+    '  },',
+    '  "versao_prompt": "' + IA_POP_PROMPT_VERSAO_ + '"',
+    '}',
+  ].join('\n');
+}
+
+function iaPad2_(n) {
+  var s = String(n);
+  return s.length >= 2 ? s : '0' + s;
+}
+
+function iaStripJsonFence_(s) {
+  s = String(s || '').trim();
+  if (s.indexOf('```') === 0) {
+    s = s.replace(/^```[a-zA-Z]*\s*/m, '').replace(/\s*```$/m, '');
+  }
+  return s.trim();
+}
+
+function iaOpenAiChatJson_(systemText, userText) {
+  var props = PropertiesService.getScriptProperties();
+  var key = props.getProperty('OPENAI_API_KEY');
+  if (!key || !String(key).trim()) {
+    throw new Error('OPENAI_API_KEY não configurada (Propriedades do script).');
+  }
+  var model = String(props.getProperty('OPENAI_MODEL') || 'gpt-4o-mini').trim();
+  var body = {
+    model: model,
+    temperature: 0.35,
+    response_format: { type: 'json_object' },
+    messages: [
+      { role: 'system', content: String(systemText || IA_POP_PROMPT_SISTEMA_) },
+      { role: 'user', content: String(userText || '') },
+    ],
+  };
+  var opt = {
+    method: 'post',
+    contentType: 'application/json',
+    headers: { Authorization: 'Bearer ' + String(key).trim() },
+    payload: JSON.stringify(body),
+    muteHttpExceptions: true,
+  };
+  var resp = UrlFetchApp.fetch('https://api.openai.com/v1/chat/completions', opt);
+  var code = resp.getResponseCode();
+  var text = resp.getContentText();
+  if (code !== 200) {
+    throw new Error('OpenAI HTTP ' + code + ': ' + String(text || '').substring(0, 600));
+  }
+  var parsed = JSON.parse(text);
+  var msg = parsed.choices && parsed.choices[0] && parsed.choices[0].message && parsed.choices[0].message.content;
+  return String(msg || '').trim();
+}
+
+function iaBagNorm_(s) {
+  return String(s || '')
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '');
+}
+
+/** Rotinas de piso (reposição, arrumação, etc.): operacional mesmo se o erro citar cliente sem achar produto. */
+function iaIsFluxoInternoPiso_(area, processo, situacao, erro) {
+  var chunk = iaBagNorm_(String(area || '') + ' ' + String(processo || '') + ' ' + String(situacao || '') + ' ' + String(erro || ''));
+  return (
+    /\b(reposi|reabastec|prateleir|gondol|arrumac|organizac|organiza|estoque|facing|sku)\b/.test(chunk) ||
+    /\b(bagunca|bagun|produto acabou|loja cheia)\b/.test(chunk)
+  );
+}
+
+function iaClassificarLinhaPopServidor_(area, processo, situacao, erro) {
+  var bag = iaBagNorm_(String(area || '') + ' ' + String(processo || '') + ' ' + String(situacao || '') + ' ' + String(erro || ''));
+  var strong = [
+    'medicamento',
+    'venda',
+    'caixa',
+    'dinheiro',
+    'pagamento',
+    'receita',
+    'seguranca',
+    'atendimento',
+    'balcao',
+    'consumidor',
+  ];
+  var i;
+  for (i = 0; i < strong.length; i++) {
+    if (bag.indexOf(strong[i]) >= 0) return 'critico';
+  }
+  if (iaIsFluxoInternoPiso_(area, processo, situacao, erro)) return 'operacional';
+  if (bag.indexOf('cliente') >= 0) return 'critico';
+  return 'operacional';
+}
+
+function iaDetectAtendimentoCliente_(area, processo, situacao, erro) {
+  var bag = iaBagNorm_(String(area || '') + ' ' + String(processo || '') + ' ' + String(situacao || '') + ' ' + String(erro || ''));
+  if (bag.indexOf('atendimento') >= 0 || bag.indexOf('balcao') >= 0 || bag.indexOf('consumidor') >= 0) return true;
+  if (bag.indexOf('cliente') >= 0 && !iaIsFluxoInternoPiso_(area, processo, situacao, erro)) return true;
+  return false;
+}
+
+function iaColetarStringsObj_(obj, out) {
+  if (obj == null) return;
+  if (typeof obj === 'string' || typeof obj === 'number' || typeof obj === 'boolean') {
+    out.push(String(obj));
+    return;
+  }
+  if (Array.isArray(obj)) {
+    for (var i = 0; i < obj.length; i++) iaColetarStringsObj_(obj[i], out);
+    return;
+  }
+  if (typeof obj === 'object') {
+    for (var k in obj) {
+      if (!Object.prototype.hasOwnProperty.call(obj, k)) continue;
+      iaColetarStringsObj_(obj[k], out);
+    }
+  }
+}
+
+function iaTemLinguagemGenerica_(c) {
+  var parts = [];
+  iaColetarStringsObj_(c, parts);
+  var blob = parts
+    .join(' ')
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '');
+  var phrases = ['atender bem', 'ser cordial', 'fazer corretamente', 'com atencao'];
+  for (var i = 0; i < phrases.length; i++) {
+    if (blob.indexOf(phrases[i]) >= 0) return true;
+  }
+  if (/\bcorretamente\b/.test(blob)) return true;
+  return false;
+}
+
+/** Frases genéricas fracas — casar por limite de palavra (evita falso positivo em texto operacional longo). */
+function iaMotorFraseBanidasRegexesLeves_() {
+  return [
+    /\bcom\s+atencao\b/,
+    /\bagir\s+com\s+atencao\b/,
+    /\bagir\s+com\s+seguranca\b/,
+    /\batender\s+bem\b/,
+    /\bnao\s+errar\b/,
+    /\bfazer\s+corretamente\b/,
+    /\bdemonstrar\s+seguranca\b/,
+    /\bevitar\s+problemas\b/,
+    /\bnao\s+falhar\b/,
+    /\bagir\s+mal\b/,
+    /\bfazer\s+bem\b/,
+    /\berro\s+ruim\b/,
+    /\bser\s+profissional\b/,
+    /\bter\s+atitude\b/,
+    /\bboa\s+comunicacao\b/,
+  ];
+}
+
+function iaMotorContemFraseBanidaLeve_(texto) {
+  var s = iaBagNorm_(texto || '');
+  if (!s) return false;
+  var res = iaMotorFraseBanidasRegexesLeves_();
+  for (var i = 0; i < res.length; i++) {
+    if (res[i].test(s)) return true;
+  }
+  return false;
+}
+
+function iaMotorContagemTokens_(texto) {
+  var s = iaBagNorm_(texto || '');
+  if (!s) return 0;
+  return s.split(/\s+/g).filter(Boolean).length;
+}
+
+function iaMotorTemVerboAcao_(texto) {
+  var s = iaBagNorm_(texto || '');
+  if (!s) return false;
+  return /\b(falar|dizer|perguntar|responder|explicar|ouvir|olhar|encarar|manter|segurar|apoiar|virar|deixar|levantar|abaixar|apontar|girar|andar|parar|aproximar|afastar|bater|cumprimentar|acenar|esperar|chamar|confirmar|validar|verificar|conferir|checar|ler|mostrar|entregar|abrir|fechar|ligar|desligar|anotar|registar|registrar|escrever|assinar|marcar|indicar|apresentar|repetir|separar|pesar|medir|rotular|etiquetar|armazenar|guardar|limpar|higienizar|desinfetar|empacotar|orientar|avisar|informar|fazer|organizar|repor|recolocar|posicionar|alinhar)\b/.test(
+    s
+  );
+}
+
+function iaMotorTemSinalConcreto_(texto) {
+  var s = iaBagNorm_(texto || '');
+  if (!s) return false;
+  return /\b(voz|volume|tom|ritmo|olhar|olhos|contato\s+visual|rosto|cliente|balcao|caixa|prateleira|estoque|dispensa|receita|receituario|medicamento|farmaceutico|farmaceutica|corpo|costas|perfil|ombro|maos|mao|dedos|postura|pe|pernas|passos|gesto|gestos|cabeca|direccao|direcao|frente|lado|ecra|tela|teclado|telefone|gondola|reposicao|atraso|vazio|vazia)\b/.test(
+    s
+  );
+}
+
+function iaMotorTemIndicioOperacionalSimples_(texto) {
+  var s = iaBagNorm_(texto || '');
+  if (!s) return false;
+  if (/\d/.test(s)) return true;
+  if (s.length >= 36) return true;
+  var tokens = s.split(/\s+/g).filter(Boolean);
+  if (tokens.length >= 5) return true;
+  return iaMotorTemSinalConcreto_(s);
+}
+
+function iaMotorErroTemAbstracaoObvia_(texto) {
+  var s = iaBagNorm_(texto || '');
+  if (!s) return false;
+  return /\b(nao\s+(errar|falhar)|evitar\s+problemas|coisa\s+errada|algo\s+errado|qualquer\s+erro|de\s+forma\s+errada|mal\s+feito|erro\s+ruim)\b/.test(s);
+}
+
+function iaMotorValidarComoFazerErroCriticoLeve_(comoRaw, erroRaw) {
+  var como = String(comoRaw || '').trim();
+  var erro = String(erroRaw || '').trim();
+  if (!como) return 'Como fazer bem precisa descrever comportamento visível';
+  if (!erro) return 'Erro crítico precisa descrever falha visível e prática';
+  if (iaMotorContemFraseBanidaLeve_(como)) return 'Como fazer bem precisa descrever comportamento visível';
+  if (iaMotorContemFraseBanidaLeve_(erro)) return 'Erro crítico precisa descrever falha visível e prática';
+  if (como.length < 8) return 'Como fazer bem precisa descrever comportamento visível';
+  if (erro.length < 8) return 'Erro crítico precisa descrever falha visível e prática';
+  if (iaMotorErroTemAbstracaoObvia_(erro)) return 'Erro crítico precisa descrever falha visível e prática';
+  var comoOk =
+    (iaMotorTemVerboAcao_(como) && iaMotorTemSinalConcreto_(como)) ||
+    (iaMotorTemVerboAcao_(como) && iaMotorTemIndicioOperacionalSimples_(como)) ||
+    (iaMotorTemSinalConcreto_(como) && iaMotorTemIndicioOperacionalSimples_(como)) ||
+    (iaMotorTemVerboAcao_(como) && iaMotorContagemTokens_(como) >= 5);
+  if (!comoOk) return 'Como fazer bem precisa descrever comportamento visível';
+  var erroOk =
+    (iaMotorTemVerboAcao_(erro) && iaMotorTemSinalConcreto_(erro)) ||
+    (iaMotorTemVerboAcao_(erro) && iaMotorTemIndicioOperacionalSimples_(erro)) ||
+    (iaMotorTemSinalConcreto_(erro) && iaMotorTemIndicioOperacionalSimples_(erro)) ||
+    (iaMotorTemVerboAcao_(erro) && iaMotorContagemTokens_(erro) >= 4);
+  if (!erroOk) return 'Erro crítico precisa descrever falha visível e prática';
+  return '';
+}
+
+/** Validação mínima alinhada ao portal (manual) para persistência no servidor (anti-bypass). */
+function assertPortalPopMinimoSemanticoPersistencia_(normalized) {
+  var n = normalized || {};
+  var tipo = normalizeTipoPop_(n.tipo);
+  if (tipo === 'critico') return;
+  if (!String(n.titulo || '').trim()) throw new Error('Título é obrigatório');
+  var proc = n.conteudoJson && n.conteudoJson.procedimento ? n.conteudoJson.procedimento : [];
+  if (!Array.isArray(proc) || countProcedimentoEtapasValidas_(proc) < 1) {
+    throw new Error('Procedimento precisa ter ao menos 1 etapa');
+  }
+  var cj = n.conteudoJson || {};
+  var q = iaMotorValidarComoFazerErroCriticoLeve_(cj.como_fazer_bem || cj.comoFazerBem || '', cj.erro_critico || cj.erroCritico || '');
+  if (q) throw new Error(q);
+}
+
+function iaMotorPreencherComoFazerErroCriticoIncoming_(mergedIn, contract) {
+  var out = mergedIn || {};
+  var c = contract || {};
+  var ab = c.abordagem || {};
+  var ctl = c.controle || {};
+  var eg = Array.isArray(ctl.erros_graves) ? ctl.erros_graves : [];
+  var eg0 = String(eg[0] == null ? '' : eg[0]).trim();
+
+  if (!String(out.como_fazer_bem || '').trim()) {
+    var tom = String(ab.tom || '').trim();
+    var post = String(ab.postura || '').trim();
+    var bits = [];
+    if (post) bits.push('Postura: ' + post);
+    if (tom) bits.push('Tom: ' + tom);
+    if (bits.length) out.como_fazer_bem = bits.join(' · ');
+  }
+  if (!String(out.erro_critico || '').trim()) {
+    if (eg0) out.erro_critico = eg0;
+  }
+  return out;
+}
+
+function iaMotorQaChecklistIncoming_(mergedIn, contract) {
+  var falhas = [];
+  var m = mergedIn || {};
+  var c = contract || {};
+  var exec = c.execucao || {};
+  var ctl = c.controle || {};
+
+  // ação observável (heurística leve)
+  if (normalizeTipoPop_(m.tipo) === 'colaborativo') {
+    var steps = Array.isArray(m.procedimento) ? m.procedimento : [];
+    var okSteps = 0;
+    for (var i = 0; i < steps.length; i++) {
+      var st = String(steps[i] == null ? '' : steps[i]).trim();
+      if (!st) continue;
+      if (iaMotorTemVerboAcao_(st)) okSteps++;
+    }
+    if (!steps.length || okSteps < Math.max(1, Math.ceil(steps.length * 0.5))) {
+      falhas.push({ codigo: 'acao_observavel', mensagem: 'Procedimento precisa de ações observáveis (verbos) na maioria das etapas.' });
+    }
+  } else {
+    var items = Array.isArray(m.procedimento) ? m.procedimento : [];
+    var okItems = 0;
+    for (var j = 0; j < items.length; j++) {
+      var it = items[j] || {};
+      var ac = String(it.acao || it.descricao || '').trim();
+      if (ac && iaMotorTemVerboAcao_(ac)) okItems++;
+    }
+    if (!items.length || okItems < Math.max(1, Math.ceil(items.length * 0.5))) {
+      falhas.push({ codigo: 'acao_observavel', mensagem: 'Itens avaliáveis precisam descrever ação observável (verbo).' });
+    }
+  }
+
+  if (!String(exec.tempo || '').trim()) falhas.push({ codigo: 'tempo_definido', mensagem: 'Tempo da execução não definido no contrato.' });
+  if (!String(exec.frequencia || '').trim()) falhas.push({ codigo: 'frequencia_definida', mensagem: 'Frequência da execução não definida no contrato.' });
+  if (!String(m.metrica || '').trim()) falhas.push({ codigo: 'metrica', mensagem: 'Métrica ausente no payload.' });
+
+  var critBlob = iaBagNorm_(String(ctl.criterio_sucesso || '') + ' ' + String(m.metrica || ''));
+  var mensur =
+    /\b(%|\b\d+\b|zero|nenhum|checklist|binario|sim\/nao|sim\/não|confirmar|contar|registrar|medir|prazo|minutos|minuto|horas|hora|dias|dia|semana|semanal|diario|diário)\b/.test(
+      critBlob
+    );
+  if (!String(ctl.criterio_sucesso || '').trim() || !mensur) {
+    falhas.push({
+      codigo: 'criterio_sucesso_mensuravel',
+      mensagem: 'Critério de sucesso precisa ser mensurável/verificável (número, %, checklist, prazo ou contagem).',
+    });
+  }
+
+  var pre = iaMotorPreencherComoFazerErroCriticoIncoming_({ como_fazer_bem: m.como_fazer_bem, erro_critico: m.erro_critico }, c);
+  var qCE = iaMotorValidarComoFazerErroCriticoLeve_(pre.como_fazer_bem, pre.erro_critico);
+  if (qCE) falhas.push({ codigo: 'como_erro', mensagem: qCE });
+
+  return falhas;
+}
+
+function iaMotorAplicarPatchIncoming_(base, patch) {
+  var out = Object.assign({}, base || {});
+  var p = patch || {};
+  for (var k in p) {
+    if (!Object.prototype.hasOwnProperty.call(p, k)) continue;
+    out[k] = p[k];
+  }
+  return out;
+}
+
+function iaMotorSincronizarContratoComIncoming_(contract, mergedIn) {
+  var c = contract || {};
+  var m = mergedIn || {};
+  if (!c.execucao) c.execucao = {};
+  if (!c.controle) c.controle = {};
+  if (!c.abordagem) c.abordagem = {};
+
+  // Sincroniza campos “fonte” usados no preview operacional e na validação bloqueante.
+  if (normalizeTipoPop_(m.tipo) === 'colaborativo') {
+    if (Array.isArray(m.procedimento)) c.execucao.o_que_fazer = m.procedimento.slice();
+    if (m.frequencia != null && String(m.frequencia).trim()) c.execucao.frequencia = String(m.frequencia).trim();
+  }
+  if (m.metrica != null && String(m.metrica).trim()) c.controle.metrica = String(m.metrica).trim();
+
+  // Heurística: se critério sumiu, reancora no objetivo/pontos (mantém contrato coerente com payload).
+  if (!String(c.controle.criterio_sucesso || '').trim()) {
+    var obj = String(m.objetivo || '').trim();
+    if (obj) c.controle.criterio_sucesso = obj.split('\n')[0];
+  }
+
+  if (m.como_fazer_bem != null && String(m.como_fazer_bem).trim()) {
+    var cf = String(m.como_fazer_bem).trim();
+    // Mantém sinais no contrato (quando existir estrutura de abordagem).
+    if (!String(c.abordagem.postura || '').trim()) c.abordagem.postura = cf;
+  }
+  if (m.erro_critico != null && String(m.erro_critico).trim()) {
+    var eg = Array.isArray(c.controle.erros_graves) ? c.controle.erros_graves.slice() : [];
+    if (!eg.length) eg = [''];
+    eg[0] = String(m.erro_critico).trim();
+    c.controle.erros_graves = eg;
+  }
+}
+
+function iaMotorCorrigirIncomingUmaVez_(user, requestId, mergedIn, contract, falhas, pIn, sIn, eIn) {
+  var sys = [
+    'Você é um revisor interno de QA (invisível ao usuário final).',
+    'Tarefa: corrigir SOMENTE os pontos falhos do POP já gerado.',
+    'Regras:',
+    '- Retorne APENAS JSON válido (sem markdown).',
+    '- Não reescreva o POP inteiro: devolva apenas um objeto "patch" com chaves do payload que precisam mudar.',
+    '- No máximo 12 chaves alteradas.',
+    '- Textos em pt-BR, operacionais, observáveis.',
+    '- "como_fazer_bem" e "erro_critico" devem passar validação leve: texto operacional observável (verbo e/ou sinal concreto no balcão/farmácia; pode ser simples), sem frases genéricas banidas.',
+    '- "metrica" e campos relacionados a critério devem ser mensuráveis (número, %, checklist, prazo, contagem).',
+    '',
+    'FORMATO OBRIGATÓRIO:',
+    '{ "patch": { /* somente chaves alteradas */ }, "notas": [] }',
+  ].join('\n');
+
+  var userObj = {
+    entrada_usuario: { processo: pIn, situacao: sIn, erro: eIn },
+    contrato_ia: contract,
+    payload_atual: mergedIn,
+    falhas: falhas,
+  };
+  var userText = JSON.stringify(userObj);
+
+  var raw = iaOpenAiChatJson_(sys, userText);
+  raw = iaStripJsonFence_(raw);
+  var parsed = JSON.parse(raw);
+  var patch = parsed && parsed.patch ? parsed.patch : null;
+  if (!patch || typeof patch !== 'object') throw new Error('Resposta de correção inválida (sem patch).');
+
+  logGptPopIaLinha_(user, requestId, 'gpt_qa_patch', '', patch);
+  return iaMotorAplicarPatchIncoming_(mergedIn, patch);
+}
+
+function iaMapFrequenciaCritico_(freqRaw, tempoRaw) {
+  var s = normalizeText_(String(freqRaw || '') + ' ' + String(tempoRaw || ''))
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '');
+  if (s.indexOf('demanda') >= 0 || s.indexOf('quando necess') >= 0) return 'por_demanda';
+  if (s.indexOf('seman') >= 0) return 'semanal';
+  if (s.indexOf('diari') >= 0 || s.indexOf('diário') >= 0 || s.indexOf('todo dia') >= 0 || s.indexOf('tododia') >= 0) return 'diario';
+  if (s.indexOf('dia') >= 0) return 'diario';
+  return 'diario';
+}
+
+function validarContratoPopIaBloqueante_(c, linhaPopServidor, situacao, erro) {
+  var erros = [];
+  if (!c || typeof c !== 'object') {
+    erros.push('JSON inválido.');
+    return erros;
+  }
+  if (iaTemLinguagemGenerica_(c)) {
+    erros.push('Texto com linguagem genérica proibida (atender bem, ser cordial, corretamente, com atenção, etc.).');
+  }
+  var exec = c.execucao || {};
+  var ctl = c.controle || {};
+  var ab = c.abordagem || {};
+  var steps = Array.isArray(exec.o_que_fazer) ? exec.o_que_fazer : [];
+  var nEt = steps.filter(function (x) {
+    return String(x == null ? '' : x).trim() !== '';
+  }).length;
+  if (nEt < 3 || nEt > 6) erros.push('Etapas (execucao.o_que_fazer) devem ser entre 3 e 6.');
+  if (!String(exec.tempo || '').trim()) erros.push('execucao.tempo obrigatório.');
+  if (!String(exec.frequencia || '').trim()) erros.push('execucao.frequencia obrigatória.');
+  if (!String(ctl.metrica || '').trim()) erros.push('controle.metrica obrigatória.');
+  if (!String(ctl.criterio_sucesso || '').trim()) erros.push('controle.criterio_sucesso obrigatório.');
+  var eg = Array.isArray(ctl.erros_graves) ? ctl.erros_graves : [];
+  var egOk = eg
+    .map(function (x) {
+      return String(x == null ? '' : x).trim();
+    })
+    .filter(Boolean);
+  if (egOk.length < 1) erros.push('controle.erros_graves: inclua pelo menos um erro grave concreto.');
+  if (!String(c.titulo || '').trim()) erros.push('titulo obrigatório.');
+  if (!String(c.area || '').trim()) erros.push('area obrigatória.');
+  if (!String(c.processo || '').trim()) erros.push('processo obrigatório.');
+
+  var atend = iaDetectAtendimentoCliente_(String(c.area || ''), String(c.processo || ''), String(situacao || ''), String(erro || ''));
+  if (linhaPopServidor === 'critico' && atend) {
+    var diz = Array.isArray(ab.o_que_dizer) ? ab.o_que_dizer : [];
+    var nD = diz
+      .map(function (x) {
+        return String(x == null ? '' : x).trim();
+      })
+      .filter(Boolean).length;
+    if (nD < 1) erros.push('POP crítico com atendimento: abordagem.o_que_dizer obrigatório.');
+    if (!String(ab.tom || '').trim()) erros.push('POP crítico com atendimento: abordagem.tom obrigatório.');
+    if (!String(ab.postura || '').trim()) erros.push('POP crítico com atendimento: abordagem.postura obrigatória.');
+  }
+  return erros;
+}
+
+function mapContratoIaConceitoToIncoming_(user, c, linhaPopServidor, situacao, erro) {
+  var tipoPop = linhaPopServidor === 'critico' ? 'critico' : 'colaborativo';
+  var exec = c.execucao || {};
+  var ab = c.abordagem || {};
+  var ctl = c.controle || {};
+  var ctxo = c.contexto || {};
+  var steps = Array.isArray(exec.o_que_fazer)
+    ? exec.o_que_fazer
+        .map(function (x) {
+          return normalizeText_(x);
+        })
+        .filter(Boolean)
+    : [];
+  var gov = computeGovernancaDefaults_(user);
+  var objetivo =
+    normalizeText_(ctxo.quando_aplicar || '') +
+    (ctxo.exemplo ? '\n\nExemplo ilustrativo:\n' + normalizeText_(ctxo.exemplo) : '');
+  objetivo += '\n\n--- Contexto informado ---\nSituação: ' + normalizeText_(situacao) + '\nErro ou risco: ' + normalizeText_(erro);
+
+  var errosComuns = normalizeStringArray_(ctl.erros_graves || []);
+  var pontos = [];
+  if (ctl.metrica) pontos.push('Métrica: ' + normalizeText_(ctl.metrica));
+  if (ctl.criterio_sucesso) pontos.push('Critério de sucesso: ' + normalizeText_(ctl.criterio_sucesso));
+
+  var out = {
+    tipo: tipoPop,
+    origem: 'geracao_ia_conceito',
+    titulo: normalizeText_(c.titulo || ''),
+    area: normalizeText_(c.area || ''),
+    processo: normalizeText_(c.processo || ''),
+    objetivo: objetivo,
+    errosComuns: errosComuns,
+    pontosDeAtencao: pontos.length ? pontos : ['Revisar execução no chão após implantação.'],
+    metrica: normalizeText_(ctl.metrica || ''),
+    criticidade: tipoPop === 'critico' ? 'alta' : 'media',
+    status: 'rascunho',
+    publicoAlvo: 'todos',
+    leituraObrigatoria: true,
+    treinamentoObrigatorio: true,
+    autorNome: gov.autorNome,
+    donoDocumento: gov.donoDocumento,
+    aprovador: gov.aprovadorEsperado,
+  };
+
+  if (tipoPop === 'critico') {
+    out.frequencia = iaMapFrequenciaCritico_(exec.frequencia, exec.tempo);
+    var procCrit = [];
+    var n = steps.length;
+    var pesoEach = n > 0 ? (100 / n).toFixed(2) : '10';
+    for (var i = 0; i < n; i++) {
+      var id = 'IA-' + iaPad2_(i + 1);
+      procCrit.push({
+        itemId: id,
+        etapa: 'Etapa ' + (i + 1),
+        descricao: steps[i],
+        acao: steps[i],
+        criterioAvaliacao: 'Execução conforme descrição da etapa, observável no ponto de venda.',
+        tipoAvaliacao: 'binario',
+        peso: pesoEach,
+        obrigatorio: true,
+        critico: true,
+      });
+    }
+    out.procedimento = procCrit;
+  } else {
+    out.procedimento = steps;
+    out.frequencia = normalizeText_(exec.frequencia || exec.tempo || '');
+    var dizer = normalizeStringArray_(ab.o_que_dizer || []);
+    if (dizer.length) {
+      out.pontosDeAtencao = (out.pontosDeAtencao || []).concat(
+        dizer.map(function (d) {
+          return 'Fala / script: ' + d;
+        })
+      );
+    }
+    if (String(ab.tom || '').trim()) out.pontosDeAtencao.push('Tom: ' + normalizeText_(ab.tom));
+    if (String(ab.postura || '').trim()) out.pontosDeAtencao.push('Postura: ' + normalizeText_(ab.postura));
+  }
+  return out;
+}
+
+function logGptPopIaLinha_(user, requestId, acao, mensagem, payloadResumo) {
+  var rid = String(requestId || '').trim();
+  var resumo = payloadResumo;
+  if (rid) {
+    if (resumo != null && typeof resumo === 'object' && !Array.isArray(resumo)) {
+      resumo = Object.assign({ requestId: rid }, resumo);
+    } else {
+      resumo = { requestId: rid, payload: resumo };
+    }
+  }
+  var ac = String(acao || '');
+  var statusFluxo = 'ok';
+  var hasFalhas =
+    resumo != null && typeof resumo === 'object' && !Array.isArray(resumo) && Array.isArray(resumo.falhas);
+  var nFalhas = hasFalhas ? resumo.falhas.length : -1;
+  if (ac === 'gpt_qa' || ac === 'gpt_qa_pos_patch') {
+    if (nFalhas === 0) statusFluxo = 'ok';
+    else if (nFalhas > 0) statusFluxo = 'erro';
+    else statusFluxo = mensagem && String(mensagem).trim().toLowerCase() !== 'ok' ? 'erro' : 'ok';
+  } else {
+    statusFluxo = mensagem && String(mensagem).trim().toLowerCase() !== 'ok' ? 'erro' : 'ok';
+  }
+  logFluxo_(user, {
+    acao: ac,
+    etapa: 'input',
+    status: statusFluxo,
+    mensagem: String(mensagem || ''),
+    tipo: 'ia_conceito',
+    origem: 'geracao_ia_conceito',
+    popId: '',
+    payloadResumo: fluxoResumoPayloadMax500_(resumo != null ? resumo : ''),
+  });
+}
+
+/**
+ * Gera POP estruturado via OpenAI, valida no servidor e devolve payload pronto para preencherFormularioComJson.
+ * Requer OPENAI_API_KEY nas propriedades do script. requestId correlaciona logs (gpt_input, gpt_output, gpt_validacao_erro).
+ */
+function gerarPopIaConceito(token, processo, situacao, erro) {
+  ensureSchema_();
+  var ctx = requireSession_(token);
+  assertCan_(ctx.user, 'POP_CREATE_DRAFT');
+  if (!userHasPortalPermission_(ctx.user, 'geracao_ia')) {
+    return {
+      ok: false,
+      message:
+        'Seu perfil não tem acesso à geração por IA no portal. Use importação por JSON ou peça apoio à gerência.',
+      blocking: ['Geração por IA disponível apenas para gerência e diretoria.'],
+    };
+  }
+
+  var requestId = uuid_();
+  var pIn = normalizeText_(processo || '');
+  var sIn = normalizeText_(situacao || '');
+  var eIn = normalizeText_(erro || '');
+
+  logGptPopIaLinha_(ctx.user, requestId, 'gpt_input', '', { processo: pIn, situacao: sIn, erro: eIn });
+
+  if (!pIn || !sIn || !eIn) {
+    logGptPopIaLinha_(ctx.user, requestId, 'gpt_validacao_erro', 'Campos processo, situacao e erro são obrigatórios.', '');
+    return { ok: false, requestId: requestId, message: 'Preencha processo, situação e erro.', blocking: ['Entrada incompleta.'] };
+  }
+
+  var userPrompt = buildIaPopPromptUsuario_(pIn, sIn, eIn);
+
+  var rawOut = '';
+  var contract = null;
+  try {
+    rawOut = iaOpenAiChatJson_(IA_POP_PROMPT_SISTEMA_, userPrompt);
+    rawOut = iaStripJsonFence_(rawOut);
+    contract = JSON.parse(rawOut);
+  } catch (eParse) {
+    var m1 = String(eParse && eParse.message ? eParse.message : eParse);
+    logGptPopIaLinha_(ctx.user, requestId, 'gpt_validacao_erro', m1, rawOut);
+    return {
+      ok: false,
+      requestId: requestId,
+      message:
+        'A resposta da IA não veio no formato JSON esperado. Tente de novo com processo, situação e erro mais concretos (ex.: nomes de tarefas e o que foi visto no piso). Se repetir, use importação por JSON.',
+      blocking: [m1],
+    };
+  }
+
+  logGptPopIaLinha_(ctx.user, requestId, 'gpt_output', '', rawOut);
+
+  var linhaServ = iaClassificarLinhaPopServidor_(String(contract.area || ''), String(contract.processo || ''), sIn, eIn);
+  if (String(contract.linhaPop || '').trim().toLowerCase() !== String(linhaServ)) {
+    contract.linhaPop = linhaServ;
+  }
+  if (!String(contract.linhaPop || '').trim()) {
+    contract.linhaPop = linhaServ;
+  }
+
+  var bloq = validarContratoPopIaBloqueante_(contract, linhaServ, sIn, eIn);
+  if (bloq.length) {
+    var m2 = bloq.join(' ');
+    logGptPopIaLinha_(ctx.user, requestId, 'gpt_validacao_erro', m2, contract);
+    return { ok: false, requestId: requestId, message: m2, blocking: bloq };
+  }
+
+  var mergedIn;
+  try {
+    mergedIn = mapContratoIaConceitoToIncoming_(ctx.user, contract, linhaServ, sIn, eIn);
+    assertTipoPopPermitido_(ctx.user, mergedIn.tipo);
+    // Pré-preenche campos de QA no payload (sem exigir mudança no contrato IA).
+    iaMotorPreencherComoFazerErroCriticoIncoming_(mergedIn, contract);
+  } catch (eMap) {
+    var m3 = String(eMap && eMap.message ? eMap.message : eMap);
+    logGptPopIaLinha_(ctx.user, requestId, 'gpt_validacao_erro', m3, contract);
+    return { ok: false, requestId: requestId, message: m3, blocking: [m3] };
+  }
+
+  // QA interno (motor): checklist fechado + no máximo 1 correção automática invisível ao usuário.
+  try {
+    var falhasQa = iaMotorQaChecklistIncoming_(mergedIn, contract);
+    logGptPopIaLinha_(ctx.user, requestId, 'gpt_qa', falhasQa.length ? 'falhou' : 'ok', { falhas: falhasQa });
+    if (falhasQa.length) {
+      mergedIn = iaMotorCorrigirIncomingUmaVez_(ctx.user, requestId, mergedIn, contract, falhasQa, pIn, sIn, eIn);
+      iaMotorSincronizarContratoComIncoming_(contract, mergedIn);
+      var falhas2 = iaMotorQaChecklistIncoming_(mergedIn, contract);
+      logGptPopIaLinha_(ctx.user, requestId, 'gpt_qa_pos_patch', falhas2.length ? 'falhou' : 'ok', { falhas: falhas2 });
+      if (falhas2.length) {
+        var msgQa = 'Falha no padrão mínimo de qualidade (IA).';
+        logGptPopIaLinha_(ctx.user, requestId, 'gpt_validacao_erro', msgQa, { falhas: falhas2 });
+        return { ok: false, requestId: requestId, message: msgQa, blocking: falhas2.map(function (x) { return x.mensagem; }) };
+      }
+    }
+  } catch (eQa) {
+    var mQa = String(eQa && eQa.message ? eQa.message : eQa);
+    logGptPopIaLinha_(ctx.user, requestId, 'gpt_validacao_erro', mQa, '');
+    return { ok: false, requestId: requestId, message: 'Falha no padrão mínimo de qualidade (IA).', blocking: [mQa] };
+  }
+
+  // Garante persistência dos campos no payload (mesmo se o QA não precisou de correção).
+  iaMotorPreencherComoFazerErroCriticoIncoming_(mergedIn, contract);
+  iaMotorSincronizarContratoComIncoming_(contract, mergedIn);
+
+  var normalized;
+  try {
+    normalized = normalizePopJsonPayload_(ctx.user, mergedIn);
+    if (normalizeTipoPop_(normalized.tipo) === 'critico') {
+      validatePopCritico_(normalized);
+    } else {
+      var blk = validateColaborativoGptBlocking_(mergedIn);
+      if (blk.length) {
+        logGptPopIaLinha_(ctx.user, requestId, 'gpt_validacao_erro', blk.join(' | '), mergedIn);
+        return { ok: false, requestId: requestId, message: blk.join(' '), blocking: blk };
+      }
+    }
+  } catch (eNorm) {
+    var m4 = String(eNorm && eNorm.message ? eNorm.message : eNorm);
+    logGptPopIaLinha_(ctx.user, requestId, 'gpt_validacao_erro', m4, mergedIn);
+    return { ok: false, requestId: requestId, message: m4, blocking: [m4] };
+  }
+
+  try {
+    normalized.conteudoJson.versao_prompt_ia = String(contract.versao_prompt || '1.0');
+    normalized.conteudoJson.linha_pop_ia = String(linhaServ || '');
+  } catch (eMeta) {}
+
+  return { ok: true, requestId: requestId, data: normalized, contract: contract };
+}
+
+function criarPop(token, data) {
+  ensureSchema_();
+  var ctx = requireSession_(token);
+  assertCan_(ctx.user, 'POP_CREATE_DRAFT');
+
+  // HTML atual envia um objeto "flat" grande; aqui convertimos para conteudoJson.
+  var created = createPopDraft_(ctx.user, data || {});
+  logAudit_(ctx.user, 'POP_CREATE_DRAFT', 'POP', created.versaoId, auditPopDetails_(ctx.user, created, created.status));
+  if (normalizeTipoPop_(data && data.tipo) === 'colaborativo') {
+    logFluxo_(ctx.user, {
+      acao: 'salvar_rascunho',
+      etapa: 'preview',
+      status: 'ok',
+      mensagem: 'rascunho',
+      tipo: 'colaborativo',
+      origem: String((data && data.origem) || 'colaborativo_gpt'),
+      popId: String(created.popId || ''),
+      payloadResumo: fluxoResumoPayloadMax500_(data || {}),
+    });
+  }
+  return {
+    ok: true,
+    message: 'POP salvo com sucesso.',
+    codigo: created.numero,
+    popId: created.popId,
+  };
+}
+
+function editarPop(token, popId, data) {
+  ensureSchema_();
+  var ctx = requireSession_(token);
+  assertCan_(ctx.user, 'POP_EDIT_DRAFT');
+  var before = getPopForUser_(ctx.user, popId, null);
+  var updated = updatePopDraft_(ctx.user, popId, null, data || {});
+  logAudit_(ctx.user, 'POP_UPDATE_DRAFT', 'POP', updated.versaoId, auditPopDetails_(ctx.user, before, updated.status, {
+    tipoNovo: normalizeTipoPop_(updated.tipo),
+    origemNova: normalizeOrigemPop_(updated.origem),
+  }));
+  if (normalizeTipoPop_(data && data.tipo) === 'colaborativo') {
+    logFluxo_(ctx.user, {
+      acao: 'salvar_rascunho',
+      etapa: 'preview',
+      status: 'ok',
+      mensagem: 'rascunho',
+      tipo: 'colaborativo',
+      origem: String((data && data.origem) || 'colaborativo_gpt'),
+      popId: String(popId || ''),
+      payloadResumo: fluxoResumoPayloadMax500_(data || {}),
+    });
+  }
+  return { ok: true, message: 'POP atualizado com sucesso.' };
+}
+
+/** Catálogo único área × processo (cadastro + importação JSON). */
+function getProcessosCatalog_() {
+  return [
+    { area: 'Atendimento e vendas', processo: 'Atendimento' },
+    { area: 'Atendimento e vendas', processo: 'Atendimento ao cliente' },
+    { area: 'Atendimento e vendas', processo: 'Vendas consultivas' },
+    { area: 'Caixa e financeiro operacional', processo: 'Abertura/fechamento de caixa' },
+    { area: 'Recebimento e estoque', processo: 'Recebimento de mercadorias' },
+    { area: 'Recebimento e estoque', processo: 'Armazenamento e inventário' },
+    { area: 'Medicamentos e controle farmacêutico', processo: 'Dispensação' },
+    { area: 'Medicamentos e controle farmacêutico', processo: 'Controle de psicotrópicos' },
+    { area: 'Loja e operação diária', processo: 'Organização e limpeza' },
+    { area: 'Loja e operação diária', processo: 'Rotina operacional da loja' },
+    { area: 'Loja e operação diária', processo: 'Limpeza, lixo e insumos de higiene' },
+    { area: 'Loja e operação diária', processo: 'Manejo de resíduos e descarte' },
+    { area: 'Delivery e expedição', processo: 'Separação e expedição' },
+    { area: 'Gestão de pessoas e treinamento', processo: 'Treinamento de equipe' },
+    { area: 'Segurança e conformidade', processo: 'Conformidade e auditoria interna' },
+  ];
+}
+
+function getSetupData(token) {
+  var ctx = requireSession_(token);
+  assertCan_(ctx.user, 'POP_CREATE_DRAFT');
+
+  // Mantém o que o HTML espera: áreas, processos, público-alvo, status, criticidade
+  var areas = [
+    { nome: 'Atendimento e vendas' },
+    { nome: 'Caixa e financeiro operacional' },
+    { nome: 'Recebimento e estoque' },
+    { nome: 'Medicamentos e controle farmacêutico' },
+    { nome: 'Loja e operação diária' },
+    { nome: 'Delivery e expedição' },
+    { nome: 'Gestão de pessoas e treinamento' },
+    { nome: 'Segurança e conformidade' },
+  ];
+
+  return {
+    ok: true,
+    areas: areas,
+    processos: getProcessosCatalog_(),
+    publicoAlvoOptions: [
+      { value: 'todos', label: 'todos' },
+      { value: 'farmaceutico', label: 'farmaceutico' },
+    ],
+    statusOptions: [
+      { value: 'rascunho', label: 'Rascunho' },
+      { value: 'em_aprovacao', label: 'Aguardando gerente' },
+      { value: 'aguardando_diretor', label: 'Aguardando diretor' },
+      { value: 'vigente', label: 'Vigente' },
+      { value: 'em revisão', label: 'Em revisão' },
+    ],
+    criticidadeOptions: [
+      { value: 'baixa', label: 'baixa' },
+      { value: 'media', label: 'media' },
+      { value: 'alta', label: 'alta' },
+      { value: 'critica', label: 'critica' },
+    ],
+  };
+}
+
+function criarUsuario(token, nome, usuario, senha, perfil) {
+  var ctx = requireSession_(token);
+  assertCan_(ctx.user, 'USER_ADMIN');
+
+  var sheet = getSheet_(SHEET_USUARIOS);
+  var headers = getHeaders_(sheet);
+  var existing = listRows_(sheet).find(function (u) {
+    return String(u.usuario || '').toLowerCase() === String(usuario || '').toLowerCase();
+  });
+  if (existing) return { ok: false, message: 'Usuário já existe.' };
+
+  var userId = uuid_();
+  var codigo = String(nextUsuarioCodigoDisponivel_());
+  var rowObj = {
+    id: userId,
+    userId: userId, // compat
+    codigo: codigo,
+    email: '',
+    nome: String(nome || '').trim(),
+    usuario: String(usuario || '').trim(),
+    senha: String(senha || ''),
+    perfil: normalizePerfil_(perfil),
+    ativo: true,
+    criadoEm: new Date(),
+    atualizadoEm: new Date(),
+  };
+  appendRowObj_(sheet, headers, rowObj);
+  logAudit_(ctx.user, 'USER_CREATE', 'USUARIO', userId, { usuario: rowObj.usuario, perfil: rowObj.perfil, codigo: codigo });
+  return { ok: true, message: 'Usuário criado com sucesso.', codigo: codigo };
+}
+
+/**
+ * Diretor: atualizar cadastro após edição manual na planilha (recomendado usar esta UI em vez de editar ids à mão).
+ */
+function atualizarUsuario(token, userId, nome, usuario, email, perfil, senha, ativoStr) {
+  ensureSchema_();
+  var ctx = requireSession_(token);
+  assertCan_(ctx.user, 'USER_ADMIN');
+
+  var sheet = getSheet_(SHEET_USUARIOS);
+  var rows = listRowsWithRowIndex_(sheet);
+  var m = rows.find(function (r) {
+    return sameUsuarioId_(r.obj.id || r.obj.userId, userId);
+  });
+  if (!m) return { ok: false, message: 'Usuário não encontrado.' };
+
+  var novoUsuario = String(usuario || '').trim();
+  var novoNome = String(nome || '').trim();
+  var novoEmail = String(email != null ? email : '').trim();
+  var novoPerfil = normalizePerfil_(perfil);
+
+  var clash = listRows_(sheet).find(function (u) {
+    if (sameUsuarioId_(u.id || u.userId, userId)) return false;
+    return String(u.usuario || '').trim().toLowerCase() === novoUsuario.toLowerCase();
+  });
+  if (clash) return { ok: false, message: 'Login (usuário) já em uso por outro cadastro.' };
+
+  var patch = {
+    nome: novoNome,
+    usuario: novoUsuario,
+    email: novoEmail,
+    perfil: novoPerfil,
+    atualizadoEm: new Date(),
+  };
+  if (senha != null && String(senha).trim() !== '') patch.senha = String(senha);
+  if (ativoStr !== undefined && ativoStr !== null) {
+    patch.ativo = !!(ativoStr === true || ativoStr === 'true' || String(ativoStr).toUpperCase() === 'TRUE');
+  }
+
+  applyRowPatch_(sheet, m.rowIndex, patch);
+  logAudit_(ctx.user, 'USER_UPDATE', 'USUARIO', String(userId), { usuario: novoUsuario, perfil: novoPerfil });
+  return { ok: true, message: 'Usuário atualizado.' };
+}
+
+function listarUsuarios(token) {
+  var ctx = requireSession_(token);
+  assertCan_(ctx.user, 'USER_ADMIN');
+
+  var sheet = getSheet_(SHEET_USUARIOS);
+  var users = listRows_(sheet)
+    .filter(function (u) { return String(u.ativo).toLowerCase() !== 'false'; })
+    .map(function (u) {
+      return {
+        id: String(u.id || u.userId || ''),
+        codigo: String(u.codigo != null && u.codigo !== '' ? u.codigo : ''),
+        nome: String(u.nome || ''),
+        usuario: String(u.usuario || ''),
+        email: String(u.email || ''),
+        perfil: normalizePerfil_(u.perfil),
+        ativo: String(u.ativo).toLowerCase() !== 'false',
+      };
+    });
+
+  return { ok: true, usuarios: users };
+}
+
+function listarLeituras(token) {
+  var ctx = requireSession_(token);
+  assertCan_(ctx.user, 'READ_ADMIN');
+
+  var reads = listRows_(getSheet_(SHEET_LEITURAS));
+  var pops = indexBy_(listRows_(getSheet_(SHEET_POPS)), function (p) { return String(p.versaoId || p.popId || p.id); });
+  var users = indexBy_(listRows_(getSheet_(SHEET_USUARIOS)), function (u) { return String(u.id || u.userId); });
+
+  var out = reads.map(function (r) {
+    var user = users[String(r.userId || r.usuario || '')] || {};
+    var pop = pops[String(r.versaoId || '')] || {};
+    return {
+      userNome: String(user.nome || ''),
+      popTitulo: String(pop.titulo || ''),
+      versao: String(pop.versao || pop.versaoLabel || '1.0'),
+      dataLeitura: valueForClientJson_(r.lidaEm || r.dataLeitura || r.quando || ''),
+    };
+  });
+  return { ok: true, leituras: out };
+}
+
+/** POPs em fluxo que exigem ação do perfil atual (mesma base da biblioteca). */
+function buildFilaDashboard_(user, pops) {
+  var perfil = normalizePerfil_(user.perfil);
+  var uid = String(user.id || user.userId || '');
+  var em = String(user.email || '').trim().toLowerCase();
+  var uRows = listRows_(getSheet_(SHEET_USUARIOS));
+  function perfilAutorPop_(autorUserId) {
+    var u = uRows.find(function (x) {
+      return sameUsuarioId_(x.id || x.userId, autorUserId);
+    });
+    return u ? normalizePerfil_(u.perfil) : '';
+  }
+  function rascunhoParaGestao_(pop) {
+    if (String(pop.status || '') !== 'rascunho') return false;
+    var autor = pop.autorUserId;
+    if (!autor || sameUsuarioId_(autor, uid)) return false;
+    var pa = perfilAutorPop_(autor);
+    if (perfil === 'gerente') {
+      return pa === 'atendente' || pa === 'farmaceutico' || pa === 'entregador';
+    }
+    if (perfil === 'diretor') return pa !== 'diretor';
+    return false;
+  }
+  return (pops || []).filter(function (pop) {
+    if (rascunhoParaGestao_(pop)) return true;
+    var st = String(pop.status || '');
+    if (st !== 'em_aprovacao' && st !== 'aguardando_diretor') return false;
+    if (perfil === 'diretor') return true;
+    if (perfil === 'gerente') {
+      if (st === 'em_aprovacao') return true;
+      return st === 'aguardando_diretor' && sameUsuarioId_(pop.autorUserId, uid);
+    }
+    return sameUsuarioId_(pop.autorUserId, uid) ||
+      (!!em && String(pop.autorEmail || '').trim().toLowerCase() === em);
+  }).map(function (p) {
+    return {
+      popId: p.popId,
+      titulo: String(p.titulo || ''),
+      numero: String(p.numero || ''),
+      status: String(p.status || ''),
+    };
+  });
+}
+
+function getDashboardData(token) {
+  var ctx = requireSession_(token);
+  var b = buildPortalPayloadForUser_(ctx.user);
+  var pops = b.pops;
+  var stats = b.stats;
+  var perfil = normalizePerfil_(ctx.user.perfil);
+  var fila = buildFilaDashboard_(ctx.user, pops);
+  popTriageCompareLog_('getDashboardData', pops.length);
+  popDiagLog_('getDashboardData', {
+    spreadsheetId: SPREADSHEET_ID,
+    sheet: SHEET_POPS,
+    source: 'getPopsLibraryForUser_',
+    popsReturned: pops.length,
+    stats: stats,
+    filaCount: fila.length,
+    sample: pops.slice(0, 15).map(function (p) {
+      return { popId: p.popId, titulo: p.titulo, status: p.status };
+    }),
+  });
+
+  var isAdminView = perfil === 'diretor' || perfil === 'gerente';
+
+  return {
+    ok: true,
+    isAdminView: isAdminView,
+    isGerenteView: perfil === 'gerente',
+    popsNaBiblioteca: pops.length,
+    filaAprovacao: fila,
+    metrics: {
+      popsVigentes: stats.totalVigentes,
+      popsCriticos: stats.criticosVigentes,
+      usuariosAtivos: countActiveUsers_(),
+      popsEmRevisao: fila.length,
+    },
+    rankingConformidade: isAdminView ? safeBuildRankingConformidade_(ctx.user) : [],
+    meusPendentes: !isAdminView ? buildMeusPendentes_(ctx.user) : [],
+  };
+}
+
+function countPopsEmFluxoAprovacao_() {
+  var sheet = getSheet_(SHEET_POPS);
+  var rows = listRows_(sheet);
+  var statusHistogram = {};
+  var inFluxo = 0;
+  rows.forEach(function (r) {
+    var p = normalizePopRow_(r);
+    var s = String(p.status || '(vazio)');
+    statusHistogram[s] = (statusHistogram[s] || 0) + 1;
+    if (p.status === 'em_aprovacao' || p.status === 'aguardando_diretor') inFluxo++;
+  });
+  popDiagLog_('countPopsEmFluxo', {
+    spreadsheetId: SPREADSHEET_ID,
+    sheet: SHEET_POPS,
+    rawRows: rows.length,
+    inFluxo: inFluxo,
+    statusHistogram: statusHistogram,
+  });
+  return inFluxo;
+}
+
+// =============================================================================
+// Core: Sessão / Auth
+// =============================================================================
+
+/**
+ * Login aceito (sem ambiguidade):
+ * 1) coluna usuario (case insensitive)
+ * 2) coluna email (case insensitive)
+ * 3) id / userId OU codigo, conforme o formato do que foi digitado:
+ *    - Se o login for só dígitos (ex.: "12"): primeiro codigo, depois id — espelha o uso real ("meu número" = codigo).
+ *    - Caso contrário: primeiro id/userId (texto exato), depois codigo.
+ */
+/** Compara ids de usuário na planilha (número vs texto "3", "003"). */
+function sameUsuarioId_(a, b) {
+  var sa = String(a != null && a !== '' ? a : '').trim();
+  var sb = String(b != null && b !== '' ? b : '').trim();
+  if (!sa || !sb) return false;
+  if (sa === sb) return true;
+  if (/^\d+$/.test(sa) && /^\d+$/.test(sb)) {
+    try {
+      return parseInt(sa, 10) === parseInt(sb, 10);
+    } catch (e) {
+      return false;
+    }
+  }
+  return false;
+}
+
+function findActiveUserForLogin_(emailOrUserOrId, senha) {
+  var users = listRows_(getSheet_(SHEET_USUARIOS));
+  var loginRaw = String(emailOrUserOrId || '').trim();
+  var loginLower = loginRaw.toLowerCase();
+  var loginSoDigitos = /^\d+$/.test(loginRaw);
+  var pass = String(senha || '');
+
+  function ativo(u) {
+    return String(u.ativo).toLowerCase() !== 'false';
+  }
+  function senhaOk(u) {
+    return String(u.senha != null ? u.senha : '') === String(pass);
+  }
+  function normUser(u) {
+    if (!u) return null;
+    if (!u.id && u.userId) u.id = u.userId;
+    if (!u.userId && u.id) u.userId = u.id;
+    u.perfil = normalizePerfil_(u.perfil);
+    return u;
+  }
+
+  var cand = users.filter(function (u) {
+    return ativo(u) && senhaOk(u);
+  });
+  if (!cand.length) return null;
+
+  function pick(matchFn) {
+    for (var i = 0; i < cand.length; i++) {
+      if (matchFn(cand[i])) return cand[i];
+    }
+    return null;
+  }
+
+  var u1 = pick(function (u) {
+    return String(u.usuario || '').trim().toLowerCase() === loginLower;
+  });
+  if (u1) return normUser(u1);
+
+  var u2 = pick(function (u) {
+    return String(u.email || '').trim().toLowerCase() === loginLower;
+  });
+  if (u2) return normUser(u2);
+
+  function matchId_(u) {
+    return sameUsuarioId_(loginRaw, u.id || u.userId) || String(u.id || u.userId || '').trim().toLowerCase() === loginLower;
+  }
+  function matchCodigo_(u) {
+    return loginMatchesUsuarioCodigo_(loginRaw, u.codigo);
+  }
+
+  if (loginSoDigitos) {
+    var uCodPrimeiro = pick(matchCodigo_);
+    if (uCodPrimeiro) return normUser(uCodPrimeiro);
+    var uIdDepois = pick(matchId_);
+    if (uIdDepois) return normUser(uIdDepois);
+  } else {
+    var uId = pick(matchId_);
+    if (uId) return normUser(uId);
+    var uCod = pick(matchCodigo_);
+    if (uCod) return normUser(uCod);
+  }
+
+  return null;
+}
+
+function createSession_(user) {
+  var sheet = getSheet_(SHEET_SESSOES);
+  var headers = getHeaders_(sheet);
+
+  var sessionId = uuid_();
+  var now = new Date();
+  var expiraEm = new Date(now.getTime() + SESSION_TTL_HOURS * 60 * 60 * 1000);
+
+  var rowObj = {
+    sessionId: sessionId,
+    userId: String(user.id || user.userId || ''),
+    email: String(user.email || ''),
+    usuario: String(user.usuario || '').trim().toLowerCase(),
+    criadoEm: now,
+    expiraEm: expiraEm,
+    revogadoEm: '',
+  };
+  appendRowObj_(sheet, headers, rowObj);
+  return rowObj;
+}
+
+function revokeSession_(sessionId) {
+  var sheet = getSheet_(SHEET_SESSOES);
+  var rows = listRowsWithRowIndex_(sheet);
+  var match = rows.find(function (r) { return String(r.obj.sessionId) === String(sessionId); });
+  if (!match) return;
+  if (match.obj.revogadoEm) return;
+  setCell_(sheet, match.rowIndex, 'revogadoEm', new Date());
+}
+
+function requireSession_(sessionId) {
+  if (!sessionId) throw new Error('Sessão inválida.');
+  var sheet = getSheet_(SHEET_SESSOES);
+  var rowsS = listRowsWithRowIndex_(sheet);
+  var sm = rowsS.find(function (r) { return String(r.obj.sessionId) === String(sessionId); });
+  if (!sm) throw new Error('Sessão inválida.');
+  var sessao = sm.obj;
+
+  if (sessao.revogadoEm) throw new Error('Sessão encerrada.');
+  var exp = parseDateSafe_(sessao.expiraEm);
+  if (!exp || exp.getTime() < Date.now()) throw new Error('Sessão expirada.');
+
+  var userId = String(sessao.userId != null ? sessao.userId : '').trim();
+  var loginSessao = String(sessao.usuario || '').trim().toLowerCase();
+  var users = listRows_(getSheet_(SHEET_USUARIOS));
+
+  // Prioridade: userId da sessão (fonte após edição na planilha) > login na coluna usuario.
+  // Ordem antiga (usuario primeiro) fazia sessões corrompidas mostrarem outro nome/permissões.
+  var user = null;
+  if (userId) {
+    user = users.find(function (u) {
+      if (String(u.ativo).toLowerCase() === 'false') return false;
+      return sameUsuarioId_(u.id || u.userId, userId);
+    });
+  }
+  if (!user && loginSessao) {
+    user = users.find(function (u) {
+      if (String(u.ativo).toLowerCase() === 'false') return false;
+      return String(u.usuario || '').trim().toLowerCase() === loginSessao;
+    });
+  }
+  if (!user) throw new Error('Sessão inválida: usuário não encontrado (id ou login). Faça login novamente.');
+
+  if (String(user.ativo).toLowerCase() === 'false') throw new Error('Usuário inativo.');
+
+  user.id = String(user.id || user.userId || '');
+  user.userId = user.id;
+  user.perfil = normalizePerfil_(user.perfil);
+
+  var patchSess = {};
+  if (user.id && !sameUsuarioId_(sessao.userId, user.id)) patchSess.userId = user.id;
+  var uLow = String(user.usuario || '').trim().toLowerCase();
+  if (uLow && loginSessao !== uLow) patchSess.usuario = uLow;
+  if (Object.keys(patchSess).length) {
+    try {
+      applyRowPatch_(sheet, sm.rowIndex, patchSess);
+    } catch (ePatch) {
+      popDiagLog_('session.align.patch.skip', { err: String(ePatch && ePatch.message ? ePatch.message : ePatch) });
+    }
+  }
+
+  return { session: sessao, user: user };
+}
+
+function publicUser_(user) {
+  var perfil = normalizePerfil_(user.perfil);
+  return {
+    id: String(user.id || user.userId || ''),
+    userId: String(user.id || user.userId || ''),
+    codigo: String(user.codigo != null && user.codigo !== '' ? user.codigo : ''),
+    email: String(user.email || ''),
+    nome: String(user.nome || ''),
+    usuario: String(user.usuario || ''),
+    perfil: perfil,
+    permissions: permissionsForPerfil_(perfil),
+  };
+}
+
+function permissionsForPerfil_(perfil) {
+  var p = normalizePerfil_(perfil);
+  if (p === 'diretor')
+    return ['usuarios', 'novo_pop', 'leituras', 'publicar_pop', 'aprovar_pop', 'performance_operacional', 'geracao_ia'];
+  if (p === 'gerente') return ['novo_pop', 'aprovar_pop', 'performance_operacional', 'geracao_ia'];
+  if (p === 'farmaceutico') return ['novo_pop', 'performance_operacional'];
+  if (p === 'atendente') return ['novo_pop', 'performance_operacional'];
+  if (p === 'entregador') return ['novo_pop', 'performance_operacional'];
+  return [];
+}
+
+function userHasPortalPermission_(user, permission) {
+  var perfil = normalizePerfil_(user && user.perfil);
+  var list = permissionsForPerfil_(perfil);
+  return list.indexOf(String(permission || '')) >= 0;
+}
+
+function assertCan_(user, action) {
+  if (can_(user, action)) return;
+  throw new Error('Sem permissão para esta ação.');
+}
+
+function can_(user, action) {
+  var perfil = normalizePerfil_(user.perfil);
+  var actionsByPerfil = {
+    diretor: ['POP_CREATE_DRAFT', 'POP_EDIT_DRAFT', 'POP_MARK_VIGENTE_BASIC', 'POP_APPROVE_MANAGER', 'USER_ADMIN', 'READ_ADMIN'],
+    gerente: ['POP_CREATE_DRAFT', 'POP_EDIT_DRAFT', 'POP_APPROVE_MANAGER'],
+    farmaceutico: ['POP_CREATE_DRAFT', 'POP_EDIT_DRAFT'],
+    atendente: ['POP_CREATE_DRAFT', 'POP_EDIT_DRAFT'],
+    entregador: ['POP_CREATE_DRAFT', 'POP_EDIT_DRAFT'],
+  };
+  var allowed = actionsByPerfil[perfil] || [];
+  return allowed.indexOf(action) >= 0;
+}
+
+function auditPopDetails_(user, pop, statusNovo, extra) {
+  var out = extra || {};
+  out.usuario = String(user && (user.usuario || user.email || user.id || user.userId) || '');
+  out.perfil = normalizePerfil_(user && user.perfil);
+  out.popId = String(pop && pop.popId || '');
+  out.numero = String(pop && pop.numero || '');
+  out.tipo = normalizeTipoPop_(pop && pop.tipo);
+  out.origem = normalizeOrigemPop_(pop && pop.origem);
+  out.statusAnterior = String(pop && pop.status || '');
+  out.statusNovo = String(statusNovo || pop && pop.status || '');
+  return out;
+}
+
+function incomingLinhaPop_(incoming) {
+  var obj = incoming || {};
+  var content = obj.conteudoJson || obj.conteudoObj || obj.payload || {};
+  if (typeof content === 'string') content = safeJsonParse_(content) || {};
+  return normalizeText_(obj.linhaPop || content.linhaPop || obj.tipo || content.tipo || '');
+}
+
+function assertTipoLinhaPopPermitidos_(user, normalized, incoming) {
+  var linha = incomingLinhaPop_(incoming).toLowerCase();
+  var tipo = normalizeTipoPop_(normalized && normalized.tipo);
+  if ((tipo === 'critico' || linha === 'critico') && !userMayPersistPopCritico_(user)) {
+    throw new Error('Seu perfil não pode criar, alterar ou classificar POP como crítico.');
+  }
+}
+
+function assertPopCamposMinimosFluxo_(pop) {
+  var cj = pop && pop.conteudoObj || {};
+  var procedimento = cj.procedimento;
+  var objetivo = normalizeText_(cj.objetivo || pop.objetivo || '');
+  var erros = [];
+  if (!normalizeText_(pop && pop.titulo)) erros.push('titulo');
+  if (!normalizeText_(pop && pop.area)) erros.push('area');
+  if (!normalizeText_(pop && pop.processo)) erros.push('processo');
+  if (!objetivo) erros.push('objetivo');
+  if (!Array.isArray(procedimento) || !procedimento.length) erros.push('procedimento[]');
+  if (erros.length) throw new Error('Campos mínimos obrigatórios para avançar fluxo: ' + erros.join(', ') + '.');
+}
+
+// =============================================================================
+// Validação técnica bloqueante — publicação (vigente)
+// Normalizável: trim, enums canônicos, sinónimos leves. Conteúdo: bloqueia com lista objetiva.
+// =============================================================================
+
+var POP_PUBLISH_MIN_CHECKLIST_ = 5;
+var POP_PUBLISH_MIN_PROC_COLAB_ = 3;
+var POP_PUBLISH_MIN_PROC_CRITICO_ = 3;
+var POP_PUBLISH_MIN_OBJETIVO_LEN_ = 35;
+var POP_PUBLISH_MIN_METRICA_LEN_ = 12;
+
+/**
+ * Normalização determinística para comparar placeholders (não usar iaBagNorm_ aqui).
+ * Ordem: (a) string segura (b) BOM (c) NBSP (d) hífens (e) trim (f) espaços (g) lowercase (h) acentos (i) comparação fora.
+ */
+function popNormTextoPlaceholder_(s) {
+  var t = s == null ? '' : String(s);
+  t = t.replace(/\uFEFF/g, '');
+  t = t.replace(/\u00A0/g, ' ');
+  t = t.replace(/\s*[\u002D\u2013\u2014]\s*/g, ' ');
+  t = t.trim();
+  t = t.replace(/\s+/g, ' ');
+  t = t.toLowerCase();
+  t = popRemoverDiacriticosLatinos_(t);
+  t = t.replace(/\./g, '');
+  t = t.replace(/\s+/g, ' ').trim();
+  return t;
+}
+
+/** Remoção de diacríticos: NFD + strip; fallback explícito se normalize não existir. */
+function popRemoverDiacriticosLatinos_(str) {
+  if (str == null || str === '') return '';
+  var t = String(str);
+  try {
+    if (typeof t.normalize === 'function') {
+      return t.normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+    }
+  } catch (e) {}
+  return t
+    .replace(/[àáâãäåāăą]/g, 'a')
+    .replace(/[èéêëēĕėę]/g, 'e')
+    .replace(/[ìíîïīĭįı]/g, 'i')
+    .replace(/[òóôõöōŏő]/g, 'o')
+    .replace(/[ùúûüūŭůűų]/g, 'u')
+    .replace(/[ñǹńň]/g, 'n')
+    .replace(/[çćĉċč]/g, 'c')
+    .replace(/[ýÿŷ]/g, 'y');
+}
+
+/** Texto explícito "Não informado" / equivalentes (proibido em publicação). */
+function popEsNaoInformadoLiteral_(s) {
+  var key = popNormTextoPlaceholder_(s);
+  if (!key) return false;
+  return (
+    key === 'nao informado' ||
+    key === 'n/a' ||
+    key === 'na' ||
+    key === 's/o' ||
+    key === 'sem informacao' ||
+    key === 'a definir' ||
+    key === 'indefinido' ||
+    key === 'nao se aplica'
+  );
+}
+
+/**
+ * Executar no editor Apps Script: valida que os casos conhecidos normalizam para "nao informado".
+ * @returns {{ ok: boolean, detalhes: Array<{entrada: string, normalizado: string, esperado: string, pass: boolean}> }}
+ */
+function popSelfTestPlaceholderNormalizacao_() {
+  var samples = [
+    'Não informado',
+    'nao informado',
+    'NÃO INFORMADO',
+    'Não   informado',
+    'não-informado',
+    'Não\u00A0informado',
+  ];
+  var want = 'nao informado';
+  var detalhes = [];
+  var ok = true;
+  for (var i = 0; i < samples.length; i++) {
+    var k = popNormTextoPlaceholder_(samples[i]);
+    var pass = k === want;
+    if (!pass) ok = false;
+    detalhes.push({ entrada: samples[i], normalizado: k, esperado: want, pass: pass });
+  }
+  return { ok: ok, detalhes: detalhes };
+}
+
+function popThrowValidacaoPublicacao_(erros) {
+  if (!erros || !erros.length) return;
+  var msg = 'Publicação bloqueada: ' + erros.join(' · ');
+  var e = new Error(msg);
+  e.popValidacaoErros = erros;
+  throw e;
+}
+
+/** Igual a validatePopCritico_, mas devolve lista (e aplica frequência canónica no JSON). */
+function validatePopCriticoListaErros_(normalized) {
+  var out = [];
+  if (normalizeTipoPop_(normalized.tipo) !== 'critico') return out;
+  var cj = normalized.conteudoJson || {};
+  var fq = normalizeFrequenciaCritico_(cj.frequencia || '');
+  if (!fq) {
+    out.push('frequência inválida ou ausente (use diário, semanal ou por demanda)');
+    return out;
+  }
+  normalized.conteudoJson.frequencia = fq;
+  var proc = normalized.conteudoJson.procedimento;
+  if (!Array.isArray(proc) || proc.length < POP_PUBLISH_MIN_PROC_CRITICO_) {
+    out.push('procedimento insuficiente (mínimo ' + POP_PUBLISH_MIN_PROC_CRITICO_ + ' itens avaliáveis)');
+    return out;
+  }
+  var seen = {};
+  for (var i = 0; i < proc.length; i++) {
+    var it = proc[i];
+    if (!it || typeof it !== 'object') {
+      out.push('procedimento: item ' + (i + 1) + ' inválido (objeto esperado)');
+      continue;
+    }
+    var id = String(it.itemId || '').trim();
+    if (!id) out.push('procedimento: item sem itemId');
+    else if (seen[id]) out.push('itemId duplicado no procedimento: ' + id);
+    else seen[id] = true;
+    if (!String(it.etapa || '').trim()) out.push('POP crítico: etapa obrigatória no item ' + (id || String(i + 1)));
+    if (!String(it.acao || '').trim()) out.push('POP crítico: ação obrigatória no item ' + (id || String(i + 1)));
+    var crit = String(it.criterioAvaliacao || '').trim();
+    if (!crit) out.push('POP crítico: critério de avaliação obrigatório no item ' + (id || String(i + 1)));
+    else {
+      if (crit.length < 14) out.push('criterio_avaliacao vago ou curto no item ' + (id || String(i + 1)));
+      if (iaMotorContemFraseBanidaLeve_(crit)) out.push('criterio_avaliacao abstrato no item ' + (id || String(i + 1)));
+      var critOk =
+        /\b(%|\b\d+\b|zero|nenhum|checklist|binario|sim\/nao|sim\/não|confirmar|contar|registrar|medir|prazo|minutos|minuto|horas|hora|dias|dia|semana|semanal|diario|diário)\b/.test(iaBagNorm_(crit));
+      if (!critOk) out.push('criterio_avaliacao não auditável (sem indício mensurável) no item ' + (id || String(i + 1)));
+    }
+    if (String(it.tipoAvaliacao || 'binario') !== 'binario') out.push('POP crítico: tipoAvaliacao deve ser binario no item ' + (id || String(i + 1)));
+    var pe = String(it.peso != null ? it.peso : '').trim();
+    if (!pe) out.push('POP crítico: peso obrigatório no item ' + (id || String(i + 1)));
+    else if (isNaN(parseFloat(pe))) out.push('POP crítico: peso numérico inválido no item ' + (id || String(i + 1)));
+    if (it.obrigatorio === undefined) out.push('POP crítico: campo obrigatorio obrigatório no item ' + (id || String(i + 1)));
+    if (it.critico === undefined) out.push('POP crítico: campo critico obrigatório no item ' + (id || String(i + 1)));
+    var acTxt = String(it.acao || it.descricao || '').trim();
+    if (acTxt && !iaMotorTemVerboAcao_(acTxt)) out.push('acao sem verbo observável no item ' + (id || String(i + 1)));
+  }
+  return out;
+}
+
+function popCatalogoParAreaProcessoOk_(area, processo) {
+  var cat = getProcessosCatalog_();
+  var aBag = iaBagNorm_(area);
+  var pBag = iaBagNorm_(processo);
+  for (var i = 0; i < cat.length; i++) {
+    if (iaBagNorm_(cat[i].area) === aBag && iaBagNorm_(cat[i].processo) === pBag) return { ok: true, area: cat[i].area, processo: cat[i].processo };
+  }
+  return { ok: false, area: area, processo: processo };
+}
+
+/**
+ * Corrige o que for normalizável in-place (também em conteudoObj). Devolve true se alterou dados persistíveis.
+ */
+function popAplicarNormalizaveisPublicacao_(pop) {
+  var mudou = false;
+  if (!pop) return false;
+  var t0 = normalizeText_(pop.titulo);
+  if (t0 !== pop.titulo) {
+    pop.titulo = t0;
+    mudou = true;
+  }
+  pop.publicoAlvo = normalizePerfil_(pop.publicoAlvo || 'todos');
+  pop.criticidade = normalizeCriticidade_(pop.criticidade || 'media');
+  pop.tipo = normalizeTipoPop_(pop.tipo || 'colaborativo');
+  var cj = pop.conteudoObj && typeof pop.conteudoObj === 'object' ? pop.conteudoObj : {};
+  pop.conteudoObj = cj;
+
+  var keys = Object.keys(cj);
+  for (var k = 0; k < keys.length; k++) {
+    var key = keys[k];
+    var v = cj[key];
+    if (typeof v === 'string') {
+      var nt = normalizeText_(v);
+      if (nt !== v) {
+        cj[key] = nt;
+        mudou = true;
+      }
+    }
+  }
+
+  var par = popCatalogoParAreaProcessoOk_(pop.area, pop.processo);
+  if (par.ok) {
+    if (pop.area !== par.area || pop.processo !== par.processo) {
+      pop.area = par.area;
+      pop.processo = par.processo;
+      mudou = true;
+    }
+    if (cj.area !== par.area || cj.processo !== par.processo) {
+      cj.area = par.area;
+      cj.processo = par.processo;
+      mudou = true;
+    }
+  }
+
+  if (normalizeTipoPop_(pop.tipo) === 'critico') {
+    var fq = normalizeFrequenciaCritico_(cj.frequencia || '');
+    if (fq && fq !== cj.frequencia) {
+      cj.frequencia = fq;
+      mudou = true;
+    }
+  }
+
+  return mudou;
+}
+
+function popTokensSignificativos_(s) {
+  var stop = {
+    de: 1,
+    da: 1,
+    do: 1,
+    das: 1,
+    dos: 1,
+    e: 1,
+    a: 1,
+    o: 1,
+    os: 1,
+    as: 1,
+    em: 1,
+    no: 1,
+    na: 1,
+    nos: 1,
+    nas: 1,
+    para: 1,
+    com: 1,
+    por: 1,
+    um: 1,
+    uma: 1,
+    que: 1,
+    se: 1,
+  };
+  return iaBagNorm_(s)
+    .split(/\s+/g)
+    .filter(function (t) {
+      return t.length > 2 && !stop[t];
+    });
+}
+
+function popSimilaridadeBagOfWords_(a, b) {
+  var A = popTokensSignificativos_(a);
+  var B = popTokensSignificativos_(b);
+  if (!A.length || !B.length) return 0;
+  var setA = {};
+  for (var i = 0; i < A.length; i++) setA[A[i]] = 1;
+  var inter = 0;
+  for (var j = 0; j < B.length; j++) {
+    if (setA[B[j]]) inter++;
+  }
+  var uni = A.length + B.length - inter;
+  return uni ? inter / uni : 0;
+}
+
+function popValidarChecklistPublicacao_(checklistArr) {
+  var erros = [];
+  var arr = normalizeStringArray_(checklistArr || []);
+  var valid = [];
+  for (var i = 0; i < arr.length; i++) {
+    var raw = arr[i];
+    if (popEsNaoInformadoLiteral_(raw)) {
+      erros.push('checklist com item "Não informado"');
+      continue;
+    }
+    var t = normalizeText_(raw);
+    if (t) valid.push(t);
+  }
+  if (valid.length < POP_PUBLISH_MIN_CHECKLIST_) {
+    erros.push('checklist insuficiente (' + valid.length + '/' + POP_PUBLISH_MIN_CHECKLIST_ + ')');
+  }
+  var seen = {};
+  for (var a = 0; a < valid.length; a++) {
+    var k = iaBagNorm_(valid[a]).replace(/\s+/g, ' ').trim();
+    if (!k) continue;
+    if (seen[k]) erros.push('repetição de itens no checklist');
+    seen[k] = true;
+  }
+  for (var p = 0; p < valid.length; p++) {
+    for (var q = p + 1; q < valid.length; q++) {
+      if (popSimilaridadeBagOfWords_(valid[p], valid[q]) >= 0.82) {
+        erros.push('checklist com variações superficiais do mesmo comportamento');
+        break;
+      }
+    }
+    if (erros.indexOf('checklist com variações superficiais do mesmo comportamento') >= 0) break;
+  }
+  if (valid.length >= POP_PUBLISH_MIN_CHECKLIST_) {
+    var curtas = 0;
+    for (var c = 0; c < valid.length; c++) {
+      if (iaMotorContagemTokens_(valid[c]) <= 2) curtas++;
+    }
+    if (curtas >= 3) erros.push('preenchimento artificial no checklist (itens muito curtos)');
+  }
+  return erros;
+}
+
+function popObjetivoContaminadoOuFraco_(titulo, objetivo) {
+  var o = normalizeText_(objetivo);
+  if (!o) return 'objetivo ausente';
+  if (popEsNaoInformadoLiteral_(o)) return 'objetivo não pode ser "Não informado"';
+  if (o.length < POP_PUBLISH_MIN_OBJETIVO_LEN_) return 'objetivo insuficiente (menos de ' + POP_PUBLISH_MIN_OBJETIVO_LEN_ + ' caracteres)';
+  var t = iaBagNorm_(titulo);
+  var ob = iaBagNorm_(o);
+  if (t && ob === t) return 'objetivo contaminado (igual ao título)';
+  var wt = t.split(/\s+/).filter(function (x) {
+    return x.length > 2;
+  });
+  var wo = ob.split(/\s+/).filter(function (x) {
+    return x.length > 2;
+  });
+  if (wt.length && wo.length) {
+    var set = {};
+    for (var i = 0; i < wt.length; i++) set[wt[i]] = 1;
+    var hit = 0;
+    for (var j = 0; j < wo.length; j++) {
+      if (set[wo[j]]) hit++;
+    }
+    if (hit / wo.length > 0.85 && o.length < 120) return 'objetivo contaminado (repete o título sem resultado mensurável)';
+  }
+  return '';
+}
+
+function popValidacaoConteudoBloqueantePublicacao_(pop) {
+  var erros = [];
+  var tipo = normalizeTipoPop_(pop && pop.tipo);
+  var cj = (pop && pop.conteudoObj) || {};
+
+  try {
+    assertPopCamposMinimosFluxo_(pop);
+  } catch (e0) {
+    erros.push(String(e0.message || e0));
+  }
+
+  if (popEsNaoInformadoLiteral_(pop.titulo) || !normalizeText_(pop.titulo)) erros.push('titulo inválido ou "Não informado"');
+  if (popEsNaoInformadoLiteral_(pop.area) || !normalizeText_(pop.area)) erros.push('area inválida ou "Não informado"');
+  if (popEsNaoInformadoLiteral_(pop.processo) || !normalizeText_(pop.processo)) erros.push('processo inválido ou "Não informado"');
+
+  var catOk = popCatalogoParAreaProcessoOk_(pop.area, pop.processo);
+  if (!catOk.ok) erros.push('area/processo fora do cadastro (enum)');
+
+  var perf = normalizePerfil_(pop.publicoAlvo || 'todos');
+  var perfOk = ['todos', 'farmaceutico', 'gerente', 'diretor', 'atendente', 'entregador'].indexOf(perf) >= 0;
+  if (!perfOk) erros.push('publicoAlvo enum inválido');
+
+  var objMsg = popObjetivoContaminadoOuFraco_(pop.titulo, cj.objetivo || pop.objetivo || '');
+  if (objMsg) {
+    if (objMsg.indexOf('contaminado') >= 0) erros.push('objetivo contaminado');
+    else if (objMsg.indexOf('insuficiente') >= 0) erros.push('objetivo insuficiente');
+    else if (objMsg.indexOf('Não informado') >= 0) erros.push('objetivo não pode ser "Não informado"');
+    else erros.push(objMsg);
+  }
+
+  if (tipo === 'colaborativo') {
+    var proc = cj.procedimento;
+    var nEt = countProcedimentoEtapasValidas_(proc);
+    if (nEt < POP_PUBLISH_MIN_PROC_COLAB_) {
+      erros.push('procedimento insuficiente (mínimo ' + POP_PUBLISH_MIN_PROC_COLAB_ + ' etapas com conteúdo)');
+    } else {
+      var verbOk = 0;
+      if (Array.isArray(proc)) {
+        for (var i = 0; i < proc.length; i++) {
+          var st = popBehavioralProcedimentoStepText_(proc[i]);
+          if (st && iaMotorTemVerboAcao_(st)) verbOk++;
+        }
+      }
+      if (verbOk < Math.max(2, Math.ceil(nEt * 0.5))) {
+        erros.push('procedimento de balcão: maioria das etapas sem verbo de ação observável');
+      }
+    }
+
+    var como = String(cj.como_fazer_bem || cj.comoFazerBem || '').trim();
+    var erroC = String(cj.erro_critico || cj.erroCritico || '').trim();
+    if (!como) erros.push('como_fazer_bem ausente');
+    else if (popEsNaoInformadoLiteral_(como)) erros.push('como_fazer_bem não pode ser "Não informado"');
+    if (!erroC) erros.push('erro_critico ausente');
+    else if (popEsNaoInformadoLiteral_(erroC)) erros.push('erro_critico não pode ser "Não informado"');
+    if (como && erroC && !popEsNaoInformadoLiteral_(como) && !popEsNaoInformadoLiteral_(erroC)) {
+      var qCE = iaMotorValidarComoFazerErroCriticoLeve_(como, erroC);
+      if (qCE) {
+        if (qCE.indexOf('Como fazer bem') >= 0) erros.push('como_fazer_bem abstrato');
+        if (qCE.indexOf('Erro crítico') >= 0) erros.push('erro_critico abstrato');
+      }
+    }
+
+    var met = normalizeText_(cj.metrica || '');
+    if (popEsNaoInformadoLiteral_(met) || met.length < POP_PUBLISH_MIN_METRICA_LEN_) {
+      erros.push('metrica ausente ou insuficiente (mínimo ' + POP_PUBLISH_MIN_METRICA_LEN_ + ' caracteres)');
+    }
+
+    var pe = popBehavioralPontosExec_(cj.pontosDeAtencao || [], cj.pontos_criticos || []);
+    if (!pe.length) erros.push('humanizacao concreta ausente (use Fala/script, Tom, Postura ou Critério de sucesso em pontos de atenção)');
+
+    var chkErr = popValidarChecklistPublicacao_(cj.checklist);
+    for (var ce = 0; ce < chkErr.length; ce++) {
+      if (erros.indexOf(chkErr[ce]) < 0) erros.push(chkErr[ce]);
+    }
+
+    if (Array.isArray(proc)) {
+      for (var pi = 0; pi < proc.length; pi++) {
+        var step = proc[pi];
+        var txt = typeof step === 'string' ? step : stringifyMixedContentItem_(step);
+        if (txt && popEsNaoInformadoLiteral_(txt)) erros.push('procedimento com etapa "Não informado"');
+      }
+    }
+  } else if (tipo === 'critico') {
+    var normCrit = {
+      tipo: 'critico',
+      autorNome: normalizeText_(cj.autorNome || ''),
+      aprovador: normalizeText_(pop.aprovador || cj.aprovadorEsperado || ''),
+      conteudoJson: JSON.parse(JSON.stringify(cj)),
+    };
+    var ceList = validatePopCriticoListaErros_(normCrit);
+    for (var t = 0; t < ceList.length; t++) {
+      if (erros.indexOf(ceList[t]) < 0) erros.push(ceList[t]);
+    }
+    pop.conteudoObj = normCrit.conteudoJson;
+
+    var chkErr2 = popValidarChecklistPublicacao_(normCrit.conteudoJson.checklist);
+    for (var u = 0; u < chkErr2.length; u++) {
+      if (erros.indexOf(chkErr2[u]) < 0) erros.push(chkErr2[u]);
+    }
+  }
+
+  var uniq = [];
+  for (var r = 0; r < erros.length; r++) {
+    if (uniq.indexOf(erros[r]) < 0) uniq.push(erros[r]);
+  }
+  return uniq;
+}
+
+function popSnapshotPersistiveisPublicacao_(pop) {
+  return stableJson_({
+    titulo: pop.titulo,
+    area: pop.area,
+    processo: pop.processo,
+    publicoAlvo: pop.publicoAlvo,
+    criticidade: pop.criticidade,
+    tipo: pop.tipo,
+    cj: pop.conteudoObj || {},
+  });
+}
+
+function assertPopValidacaoTecnicaPublicacao_(pop, sheet, rowIndex) {
+  var antes = popSnapshotPersistiveisPublicacao_(pop);
+  popAplicarNormalizaveisPublicacao_(pop);
+  var lista = popValidacaoConteudoBloqueantePublicacao_(pop);
+  if (lista.length) popThrowValidacaoPublicacao_(lista);
+  var depois = popSnapshotPersistiveisPublicacao_(pop);
+  if (antes !== depois) {
+    applyRowPatch_(sheet, rowIndex, {
+      titulo: String(pop.titulo || ''),
+      area: String(pop.area || ''),
+      processo: String(pop.processo || ''),
+      publicoAlvo: String(pop.publicoAlvo || 'todos'),
+      criticidade: String(pop.criticidade || 'media'),
+      tipo: String(pop.tipo || 'colaborativo'),
+      conteudoJson: JSON.stringify(pop.conteudoObj || {}),
+      atualizadoEm: new Date(),
+    });
+  }
+}
+
+function isPopCriticoFluxo_(pop) {
+  var cj = pop && pop.conteudoObj || {};
+  if (normalizeTipoPop_(pop && pop.tipo) === 'critico') return true;
+  if (normalizeTipoPop_(cj && cj.tipo) === 'critico') return true;
+  return String(cj.linhaPop || cj.linha_pop_ia || '').toLowerCase() === 'critico';
+}
+
+function assertCanEditPopFlow_(user, pop) {
+  var perfil = normalizePerfil_(user && user.perfil);
+  var status = String(pop && pop.status || '');
+  var uid = String(user && (user.id || user.userId) || '');
+  var autor = String(pop && pop.autorUserId || '');
+  var isGestao = perfil === 'gerente' || perfil === 'diretor';
+
+  if (status === 'rascunho') {
+    if (isGestao || (uid && autor && sameUsuarioId_(uid, autor))) return;
+    throw new Error('Apenas o autor, gerente ou diretor podem editar este rascunho.');
+  }
+  if (status === 'em_aprovacao') {
+    if (isGestao) return;
+    throw new Error('POP em aprovação só pode ser editado por gerente ou diretor.');
+  }
+  if (status === 'aguardando_diretor') {
+    if (perfil === 'diretor') return;
+    throw new Error('POP aguardando diretor só pode ser editado pela diretoria.');
+  }
+  throw new Error('Edição não permitida para o status atual.');
+}
+
+function stableJson_(v) {
+  if (v == null) return 'null';
+  if (Array.isArray(v)) return '[' + v.map(stableJson_).join(',') + ']';
+  if (typeof v === 'object') {
+    return '{' + Object.keys(v).sort().map(function (k) {
+      return JSON.stringify(k) + ':' + stableJson_(v[k]);
+    }).join(',') + '}';
+  }
+  return JSON.stringify(v);
+}
+
+/** Texto da etapa em procedimento colaborativo (string ou objeto legado). */
+function popBehavioralProcedimentoStepText_(x) {
+  if (x == null) return '';
+  if (typeof x === 'string' || typeof x === 'number' || typeof x === 'boolean') return normalizeText_(x);
+  if (typeof x === 'object') {
+    return normalizeText_(x.texto || x.descricao || x.passo || x.item || x.titulo || x.conteudo || x.acao || '');
+  }
+  return '';
+}
+
+function popBehavioralProcedimentoColab_(proc) {
+  if (!Array.isArray(proc)) return [];
+  var out = [];
+  for (var i = 0; i < proc.length; i++) {
+    var t = popBehavioralProcedimentoStepText_(proc[i]);
+    if (t) out.push(t);
+  }
+  return out;
+}
+
+/** Linhas de pontos que alteram fala/postura ou critério explícito (ignora texto meramente explicativo). */
+function popBehavioralPontosExec_(pontos, criticos) {
+  var re = /^(Fala\s*\/\s*script|Tom|Postura|Critério de sucesso):/i;
+  var out = [];
+  var arrs = [pontos, criticos];
+  for (var a = 0; a < arrs.length; a++) {
+    var arr = Array.isArray(arrs[a]) ? arrs[a] : [];
+    for (var i = 0; i < arr.length; i++) {
+      var s = normalizeText_(arr[i]);
+      if (s && re.test(s)) out.push(s);
+    }
+  }
+  return out;
+}
+
+function popBehavioralErrosGraves_(erros, proib) {
+  var seen = {};
+  var acc = [];
+  function pushArr(arr) {
+    if (!Array.isArray(arr)) return;
+    for (var i = 0; i < arr.length; i++) {
+      var t = normalizeText_(arr[i]);
+      if (!t) continue;
+      var k = t.toLowerCase();
+      if (seen[k]) continue;
+      seen[k] = true;
+      acc.push(t);
+    }
+  }
+  pushArr(erros);
+  pushArr(proib);
+  acc.sort(function (x, y) {
+    return String(x).localeCompare(String(y), 'pt');
+  });
+  return acc;
+}
+
+function popBehavioralCritProcedimento_(proc) {
+  if (!Array.isArray(proc)) return [];
+  var out = [];
+  for (var i = 0; i < proc.length; i++) {
+    var it = proc[i];
+    if (!it || typeof it !== 'object') continue;
+    out.push({
+      itemId: normalizeText_(it.itemId || ''),
+      etapa: normalizeText_(it.etapa || ''),
+      acao: normalizeText_(it.acao || ''),
+      descricao: normalizeText_(it.descricao || ''),
+      criterioAvaliacao: normalizeText_(it.criterioAvaliacao || ''),
+      obrigatorio: it.obrigatorio === undefined ? null : !!normalizeBoolean_(it.obrigatorio),
+      critico: it.critico === undefined ? null : !!normalizeBoolean_(it.critico),
+      peso: normalizeText_(it.peso != null ? String(it.peso) : ''),
+    });
+  }
+  return out;
+}
+
+/**
+ * Visão só do que muda o comportamento no chão (ações, ordem, tempo/frequência, abordagem executável,
+ * critério de sucesso explícito, erros graves). Exclui título, área, processo, metadados e textos só explicativos.
+ */
+function popBehavioralSnapshot_(pop) {
+  var tipo = normalizeTipoPop_(pop && pop.tipo);
+  var cj = (pop && pop.conteudoObj) || {};
+  if (!cj || typeof cj !== 'object') cj = {};
+  var frame = { snapBehavior: 1, tipo: tipo };
+
+  if (tipo === 'critico') {
+    frame.frequencia = normalizeFrequenciaCritico_(cj.frequencia || '');
+    frame.procedimento = popBehavioralCritProcedimento_(cj.procedimento || []);
+    return frame;
+  }
+
+  frame.frequencia = normalizeText_(cj.frequencia || '');
+  frame.procedimento = popBehavioralProcedimentoColab_(cj.procedimento || []);
+  frame.metrica = normalizeText_(cj.metrica || '');
+  frame.pontosExec = popBehavioralPontosExec_(cj.pontosDeAtencao || [], cj.pontos_criticos || []);
+  frame.errosGraves = popBehavioralErrosGraves_(cj.errosComuns || [], cj.proibido || []);
+  frame.checklist = normalizeStringArray_(cj.checklist || [])
+    .map(function (x) {
+      return normalizeText_(x);
+    })
+    .filter(Boolean);
+  return frame;
+}
+
+function popRelevantSnapshot_(pop) {
+  return stableJson_(popBehavioralSnapshot_(pop));
+}
+
+/** Snapshots gravados antes da v2 comparavam JSON amplo; não travar reenvio até o próximo baseline comportamental. */
+function isLegacyPopSubmitRelevantSnapshot_(snapStr) {
+  var o = safeJsonParse_(String(snapStr || ''));
+  if (!o || typeof o !== 'object') return false;
+  if (Object.prototype.hasOwnProperty.call(o, 'snapBehavior')) return false;
+  if (Object.prototype.hasOwnProperty.call(o, 'conteudoJson')) return true;
+  if (Object.prototype.hasOwnProperty.call(o, 'titulo')) return true;
+  return false;
+}
+
+function latestSubmitSnapshotForPop_(popId) {
+  var rows = listRows_(getSheet_(SHEET_AUDITORIA));
+  for (var i = rows.length - 1; i >= 0; i--) {
+    var r = rows[i];
+    if (String(r.acao || '') !== 'POP_SUBMIT') continue;
+    var d = safeJsonParse_(r.detalhesJson) || {};
+    if (String(d.popId || '') === String(popId || '') && d.snapshot) return String(d.snapshot);
+  }
+  return '';
+}
+
+function assertPopChangedSinceLastSubmit_(pop) {
+  var prev = latestSubmitSnapshotForPop_(pop && pop.popId);
+  if (!prev) return;
+  if (isLegacyPopSubmitRelevantSnapshot_(prev)) return;
+  if (prev === popRelevantSnapshot_(pop)) {
+    throw new Error(
+      'Nenhuma mudança na execução foi detectada desde o último envio. Altere ação, tempo, frequência, gatilho ou critério de sucesso para reenviar à aprovação (por exemplo: ordem das etapas, métrica, falas/postura operacional, checklist no chão ou erros graves concretos).'
+    );
+  }
+}
+
+// =============================================================================
+// Core: POPs
+// =============================================================================
+
+/**
+ * Fonte única de verdade: mesma lista para biblioteca (getPortalData) e métricas do dashboard.
+ */
+function getPopsLibraryForUser_(user) {
+  return listPopsForUser_(user);
+}
+
+function listPopsForUser_(user) {
+  POP_LAST_LIST_TRIAGE_ = null;
+  var sheet = getSheet_(SHEET_POPS);
+  var raw = listRows_(sheet);
+  var rawSample = raw.slice(0, 5).map(function (row) {
+    return {
+      popId: row.popId || row.id || '',
+      versaoId: row.versaoId || '',
+      titulo: row.titulo || '',
+      status: row.status == null ? '(null)' : String(row.status),
+    };
+  });
+  popDiagLog_('listPopsForUser.start', {
+    spreadsheetId: SPREADSHEET_ID,
+    sheet: SHEET_POPS,
+    rawRows: raw.length,
+    rawSample: rawSample,
+    userPerfil: normalizePerfil_(user.perfil),
+    userId: String(user.id || user.userId || ''),
+  });
+  var normErrors = 0;
+  var pops = raw.map(function (row) {
+    try {
+      return normalizePopRow_(row);
+    } catch (e) {
+      normErrors++;
+      popDiagLog_('listPopsForUser.normalizeError', { err: String(e && e.message ? e.message : e) });
+      return null;
+    }
+  }).filter(Boolean);
+
+  var beforeSample = pops.slice(0, 15).map(function (p) {
+    return { popId: p.popId, titulo: p.titulo, status: p.status, publicoAlvo: p.publicoAlvo, exclusivoFarmaceutico: p.exclusivoFarmaceutico };
+  });
+  var rowsLostBeforeCanView = raw.length - pops.length;
+  popDiagLog_('listPopsForUser.afterNormalize', {
+    count: pops.length,
+    normalizeErrors: normErrors,
+    rowsLostBeforeCanView: rowsLostBeforeCanView,
+    sample: beforeSample,
+  });
+
+  var before = pops.length;
+  var dropped = 0;
+  var maxDropLogs = 80;
+  var dropHist = {};
+  pops = pops.filter(function (p) {
+    var vr = canViewPopReason_(user, p);
+    if (!vr.ok) {
+      dropped++;
+      dropHist[vr.reason] = (dropHist[vr.reason] || 0) + 1;
+      if (dropped <= maxDropLogs) {
+        popDiagLog_('listPopsForUser.drop_canView', {
+          reason: vr.reason,
+          popId: p.popId,
+          versaoId: p.versaoId,
+          titulo: p.titulo,
+          status: p.status,
+          publicoAlvo: p.publicoAlvo,
+          exclusivoFarmaceutico: p.exclusivoFarmaceutico,
+        });
+      }
+    }
+    return vr.ok;
+  });
+  if (dropped > maxDropLogs) {
+    popDiagLog_('listPopsForUser.drop_canView_truncated', { totalDropped: dropped, loggedFirst: maxDropLogs });
+  }
+  if (dropped > 0) {
+    popDiagLog_('listPopsForUser.drop_aggregate_NAO_SILENCIOSO', {
+      dropped: dropped,
+      dropReasonHistogram: dropHist,
+      dominantDropReason: dominantKeyInHistogram_(dropHist),
+    });
+  }
+  var outSample = pops.slice(0, 15).map(function (p) {
+    return { popId: p.popId, titulo: p.titulo, status: p.status };
+  });
+  popDiagLog_('listPopsForUser.end', {
+    spreadsheetId: SPREADSHEET_ID,
+    sheet: SHEET_POPS,
+    afterCanView: pops.length,
+    dropped: before - pops.length,
+    popsReturned: pops.length,
+    sample: outSample,
+  });
+
+  POP_LAST_LIST_TRIAGE_ = {
+    rawRows: raw.length,
+    afterNormalize: before,
+    popsReturned: pops.length,
+    dropped: before - pops.length,
+    normalizeErrors: normErrors,
+    rowsLostBeforeCanView: rowsLostBeforeCanView,
+    dropReasonHistogram: dropHist,
+    dominantDropReason: dominantKeyInHistogram_(dropHist),
+    userId: String(user.id || user.userId || ''),
+    userPerfil: normalizePerfil_(user.perfil),
+  };
+
+  return enrichPopsWithReadStatus_(user, pops);
+}
+
+function getPopForUser_(user, popId, versaoId) {
+  var sheet = getSheet_(SHEET_POPS);
+  var rawRows = listRows_(sheet);
+  popDiagLog_('getPopForUser_.read', {
+    spreadsheetId: SPREADSHEET_ID,
+    sheet: SHEET_POPS,
+    rawRows: rawRows.length,
+    popId: String(popId || ''),
+    versaoId: versaoId ? String(versaoId) : '',
+  });
+  var rows = rawRows.map(function (r) { return normalizePopRow_(r); });
+  var match = rows.find(function (p) {
+    if (versaoId) return String(p.versaoId) === String(versaoId);
+    return String(p.popId) === String(popId) || String(p.versaoId) === String(popId) || String(p.id) === String(popId);
+  });
+  if (!match) throw new Error('POP não encontrado.');
+  var vr = canViewPopReason_(user, match);
+  if (!vr.ok) throw new Error('Sem acesso a este POP.');
+
+  var enriched = enrichPopsWithReadStatus_(user, [match])[0];
+  return enriched;
+}
+
+function createPopDraft_(user, incoming) {
+  var sheet = getSheet_(SHEET_POPS);
+  var headers = getHeaders_(sheet);
+
+  var normalized = normalizePopJsonPayload_(user, incoming || {});
+  assertTipoLinhaPopPermitidos_(user, normalized, incoming || {});
+  assertTipoPopPermitido_(user, normalized.tipo);
+  assertPortalPopMinimoSemanticoPersistencia_(normalized);
+  validatePopCritico_(normalized);
+  assertAutorDiferenteDeAprovadorCritico_(normalized);
+
+  var popId = normalized.popId || uuid_();
+  var versaoId = uuid_();
+
+  var numero = normalized.numero;
+  if (!numero) numero = generatePopNumeroForFamily_(popId);
+
+  var now = new Date();
+  var rowObj = {
+    popId: popId,
+    versaoId: versaoId,
+    numero: numero,
+    versao: String(normalized.versao || '1.0'),
+    titulo: String(normalized.titulo || ''),
+    area: String(normalized.area || ''),
+    processo: String(normalized.processo || ''),
+    criticidade: normalizeCriticidade_(normalized.criticidade || 'media'),
+    status: normalizeStatus_(normalized.status || 'rascunho'),
+    exclusivoFarmaceutico: normalizeBoolean_(normalized.exclusivoFarmaceutico),
+    leituraObrigatoria: normalizeBoolean_(normalized.leituraObrigatoria),
+    treinamentoObrigatorio: normalizeBoolean_(normalized.treinamentoObrigatorio),
+    publicoAlvo: normalizePerfil_(normalized.publicoAlvo || 'todos'),
+    tags: String(normalized.tags || ''),
+    vigenciaInicio: normalized.vigenciaInicio || '',
+    revisaoPrevista: normalized.revisaoPrevista || '',
+    autorUserId: String(user.id || user.userId || ''),
+    autorEmail: String(user.email || ''),
+    criadoEm: now,
+    atualizadoEm: now,
+    conteudoJson: JSON.stringify(normalized.conteudoJson || {}),
+    conteudoHtmlGerado: normalized.conteudoHtmlGerado || '',
+    drivePdfFileId: '',
+    driveFolderAnexosId: '',
+    tipo: normalizeTipoPop_(normalized.tipo || 'colaborativo'),
+    origem: normalizeOrigemPop_(normalized.origem || ''),
+  };
+
+  // Sprint 1: garantir rascunho ao criar
+  rowObj.status = 'rascunho';
+
+  appendRowObj_(sheet, headers, rowObj);
+  var created = normalizePopRow_(rowObj);
+  popDiagLog_('createPopDraft', {
+    spreadsheetId: SPREADSHEET_ID,
+    sheet: SHEET_POPS,
+    popId: created.popId,
+    versaoId: created.versaoId,
+    titulo: created.titulo,
+    status: created.status,
+  });
+  return created;
+}
+
+function updatePopDraft_(user, popId, versaoId, incoming) {
+  var sheet = getSheet_(SHEET_POPS);
+  var rows = listRowsWithRowIndex_(sheet).map(function (x) {
+    return { rowIndex: x.rowIndex, obj: normalizePopRow_(x.obj) };
+  });
+
+  var match = rows.find(function (p) {
+    if (versaoId) return String(p.obj.versaoId) === String(versaoId);
+    return String(p.obj.popId) === String(popId) || String(p.obj.versaoId) === String(popId) || String(p.obj.id) === String(popId);
+  });
+  if (!match) throw new Error('POP não encontrado.');
+  if (!canViewPop_(user, match.obj)) throw new Error('Sem acesso a este POP.');
+  var st = String(match.obj.status || '');
+  assertCanEditPopFlow_(user, match.obj);
+  var editaveis = ['rascunho', 'em_aprovacao', 'aguardando_diretor'];
+  if (editaveis.indexOf(st) < 0) throw new Error('Edição não permitida para o status atual.');
+
+  var normalized = normalizePopJsonPayload_(user, incoming || {});
+  assertTipoLinhaPopPermitidos_(user, normalized, incoming || {});
+  assertPortalPopMinimoSemanticoPersistencia_(normalized);
+
+  // numero estável por família: não pode mudar
+  normalized.numero = match.obj.numero;
+
+  // Preserva área e processo quando o payload vem vazio (edição/aprovação parcial no portal).
+  if (!normalizeText_(normalized.area)) {
+    normalized.area = normalizeText_(match.obj.area || '');
+  }
+  if (!normalizeText_(normalized.processo)) {
+    normalized.processo = normalizeText_(match.obj.processo || '');
+  }
+  var cjMerge = normalized.conteudoJson || {};
+  if (!normalizeText_(cjMerge.area)) {
+    cjMerge.area = normalizeText_(match.obj.area || cjMerge.area || '');
+  }
+  if (!normalizeText_(cjMerge.processo)) {
+    cjMerge.processo = normalizeText_(match.obj.processo || cjMerge.processo || '');
+  }
+  normalized.conteudoJson = cjMerge;
+
+  if (normalizeTipoPop_(normalized.tipo) === 'critico') {
+    var prevCj0 = match.obj.conteudoObj || {};
+    normalized.conteudoJson.procedimento = mergeCriticoProcedimentoImutavelItemId_(
+      prevCj0.procedimento,
+      normalized.conteudoJson.procedimento
+    );
+  }
+  validatePopCritico_(normalized);
+  assertAutorDiferenteDeAprovadorCritico_(normalized);
+
+  var tipoPersistido = normalizeTipoPop_(
+    normalized.tipo !== undefined && normalized.tipo !== '' ? normalized.tipo : match.obj.tipo || 'colaborativo'
+  );
+  assertTipoPopPermitido_(user, tipoPersistido);
+
+  var now = new Date();
+  var patch = {
+    titulo: String(normalized.titulo || match.obj.titulo || ''),
+    area: String(normalized.area || match.obj.area || ''),
+    processo: String(normalized.processo || match.obj.processo || ''),
+    versao: String(normalized.versao || match.obj.versao || '1.0'),
+    status: (function () {
+      var raw = incoming && incoming.status != null ? String(incoming.status) : '';
+      raw = normalizeText_(raw);
+      if (!raw) return normalizeStatus_(match.obj.status || 'rascunho');
+      return normalizeStatus_(raw);
+    })(),
+    criticidade: normalizeCriticidade_(normalized.criticidade || match.obj.criticidade || 'media'),
+    exclusivoFarmaceutico: normalizeBoolean_(normalized.exclusivoFarmaceutico),
+    leituraObrigatoria: normalizeBoolean_(normalized.leituraObrigatoria),
+    treinamentoObrigatorio: normalizeBoolean_(normalized.treinamentoObrigatorio),
+    publicoAlvo: normalizePerfil_(normalized.publicoAlvo || match.obj.publicoAlvo || 'todos'),
+    tags: String(normalized.tags || match.obj.tags || ''),
+    vigenciaInicio: String(normalized.vigenciaInicio || match.obj.vigenciaInicio || ''),
+    revisaoPrevista: String(normalized.revisaoPrevista || match.obj.revisaoPrevista || ''),
+    conteudoJson: JSON.stringify(normalized.conteudoJson || match.obj.conteudoObj || {}),
+    conteudoHtmlGerado: normalized.conteudoHtmlGerado || match.obj.conteudoHtmlGerado || '',
+    atualizadoEm: now,
+    tipo: tipoPersistido,
+    origem: normalizeOrigemPop_(normalized.origem !== undefined ? normalized.origem : match.obj.origem || ''),
+  };
+
+  applyRowPatch_(sheet, match.rowIndex, patch);
+  var updated = getPopForUser_(user, match.obj.popId, match.obj.versaoId);
+  popDiagLog_('updatePopDraft', {
+    spreadsheetId: SPREADSHEET_ID,
+    sheet: SHEET_POPS,
+    popId: updated.popId,
+    versaoId: updated.versaoId,
+    titulo: updated.titulo,
+    status: updated.status,
+  });
+  return updated;
+}
+
+function setPopVigenteBasic_(user, popId, versaoId) {
+  var sheet = getSheet_(SHEET_POPS);
+  var rows = listRowsWithRowIndex_(sheet).map(function (x) {
+    return { rowIndex: x.rowIndex, obj: normalizePopRow_(x.obj) };
+  });
+
+  var match = rows.find(function (p) {
+    if (versaoId) return String(p.obj.versaoId) === String(versaoId);
+    return String(p.obj.popId) === String(popId) || String(p.obj.versaoId) === String(popId) || String(p.obj.id) === String(popId);
+  });
+  if (!match) throw new Error('POP não encontrado.');
+  if (!canViewPop_(user, match.obj)) throw new Error('Sem acesso a este POP.');
+
+  var st = String(match.obj.status || '');
+  if (st === 'vigente') throw new Error('Este POP já está vigente.');
+  assertPopValidacaoTecnicaPublicacao_(match.obj, sheet, match.rowIndex);
+  var podePublicarDe =
+    st === 'rascunho' || st === 'aguardando_diretor' || st === 'em_aprovacao' || st === 'em revisão';
+  if (!podePublicarDe) throw new Error('Status atual não permite publicação.');
+
+  applyRowPatch_(sheet, match.rowIndex, {
+    status: 'vigente',
+    vigenciaInicio: formatDateIso_(new Date()),
+    revisaoPrevista: computeRevisaoPrevista_(match.obj.criticidade),
+    atualizadoEm: new Date(),
+  });
+
+  var pub = getPopForUser_(user, match.obj.popId, match.obj.versaoId);
+  popDiagLog_('setPopVigenteBasic', {
+    spreadsheetId: SPREADSHEET_ID,
+    sheet: SHEET_POPS,
+    popId: pub.popId,
+    versaoId: pub.versaoId,
+    titulo: pub.titulo,
+    status: pub.status,
+  });
+  return pub;
+}
+
+function normalizePopRow_(row) {
+  var obj = clone_(row);
+
+  // compatibilidade com bases antigas: id/codigo/payload
+  if (!obj.popId && obj.id) obj.popId = String(obj.id);
+  if (!obj.versaoId && obj.id) obj.versaoId = String(obj.id);
+  if (!obj.numero && obj.codigo) obj.numero = String(obj.codigo);
+
+  obj.popId = String(obj.popId || '');
+  obj.versaoId = String(obj.versaoId || '');
+  obj.numero = String(obj.numero || '');
+
+  obj.titulo = String(obj.titulo || '');
+  obj.area = String(obj.area || '');
+  obj.processo = String(obj.processo || '');
+
+  obj.criticidade = normalizeCriticidade_(obj.criticidade || 'media');
+
+  obj.exclusivoFarmaceutico = normalizeBoolean_(obj.exclusivoFarmaceutico);
+  obj.leituraObrigatoria = normalizeBoolean_(obj.leituraObrigatoria);
+  obj.treinamentoObrigatorio = normalizeBoolean_(obj.treinamentoObrigatorio);
+  obj.publicoAlvo = normalizePerfil_(obj.publicoAlvo || 'todos');
+
+  obj.tipo = normalizeTipoPop_(obj.tipo);
+  obj.origem = normalizeOrigemPop_(obj.origem);
+
+  obj.vigenciaInicio = obj.vigenciaInicio ? String(obj.vigenciaInicio) : '';
+  obj.revisaoPrevista = obj.revisaoPrevista ? String(obj.revisaoPrevista) : '';
+
+  obj.autorUserId = String(obj.autorUserId || obj.autorId || '');
+  obj.autorEmail = String(obj.autorEmail || '');
+
+  obj.criadoEm = obj.criadoEm || obj.createdAt || '';
+  obj.atualizadoEm = obj.atualizadoEm || '';
+
+  obj.conteudoJson = obj.conteudoJson || obj.payload || '';
+  obj.conteudoHtmlGerado = obj.conteudoHtmlGerado || '';
+
+  obj.conteudoObj = safeJsonParse_(obj.conteudoJson) || {};
+
+  // Compat: campos vazios na linha mas presentes no JSON de conteúdo (bases antigas / import).
+  var cj = obj.conteudoObj;
+  obj.titulo = String(obj.titulo || cj.titulo || cj.title || cj.nome || '').trim() || 'POP sem título';
+  if (!obj.area && cj.area) obj.area = String(cj.area);
+  if (!obj.processo && cj.processo) obj.processo = String(cj.processo);
+
+  // Status sempre canonizado (nunca undefined/null em memória).
+  obj.status = normalizeStatus_(obj.status || 'rascunho');
+
+  // viewer usa o próprio JSON; html derivado é opcional
+  if (!obj.conteudoHtmlGerado) obj.conteudoHtmlGerado = '';
+
+  return obj;
+}
+
+/** Motivo do filtro canView (logs de diagnóstico). */
+function canViewPopReason_(user, pop) {
+  var perfil = normalizePerfil_(user.perfil);
+  if (perfil === 'diretor') return { ok: true, reason: 'diretor' };
+
+  // Criador sempre enxerga o próprio POP (rascunho/fila), sem esconder por público-alvo/exclusivo.
+  var uid = String(user.id || user.userId || '');
+  var autor = String(pop.autorUserId || '');
+  if (uid && autor && sameUsuarioId_(uid, autor)) return { ok: true, reason: 'autor' };
+
+  // Após troca manual de id na planilha: mesmo criador se autorEmail bater.
+  var uEm = String(user.email || '').trim().toLowerCase();
+  var pEm = String(pop.autorEmail || '').trim().toLowerCase();
+  if (uEm && pEm && uEm === pEm) return { ok: true, reason: 'autor_email' };
+
+  // Gerente enxerga fila de aprovação da equipe (submetidos por colaboradores).
+  if (perfil === 'gerente' && String(pop.status) === 'em_aprovacao') return { ok: true, reason: 'gerente_fila_aprovacao' };
+
+  // Gerente enxerga próprios POPs já encaminhados ao diretor (fila direção).
+  if (perfil === 'gerente' && String(pop.status) === 'aguardando_diretor' && uid && autor && sameUsuarioId_(uid, autor)) {
+    return { ok: true, reason: 'gerente_proprio_aguardando_diretor' };
+  }
+
+  if (normalizeBoolean_(pop.exclusivoFarmaceutico)) {
+    return perfil === 'farmaceutico' ? { ok: true, reason: 'exclusivo_ok' } : { ok: false, reason: 'exclusivo_farmaceutico' };
+  }
+  if (String(pop.publicoAlvo) === 'farmaceutico') {
+    return perfil === 'farmaceutico' ? { ok: true, reason: 'publico_farmaceutico_ok' } : { ok: false, reason: 'publico_farmaceutico' };
+  }
+  return { ok: true, reason: 'geral' };
+}
+
+function canViewPop_(user, pop) {
+  return canViewPopReason_(user, pop).ok;
+}
+
+function enrichPopsWithReadStatus_(user, pops) {
+  var reads = listRows_(getSheet_(SHEET_LEITURAS));
+  var byKey = {};
+  reads.forEach(function (r) {
+    var key = String(r.userId || '') + '|' + String(r.popId || '') + '|' + String(r.versaoId || '');
+    byKey[key] = r;
+  });
+
+  return pops.map(function (p) {
+    var key = String(user.id || user.userId || '') + '|' + String(p.popId) + '|' + String(p.versaoId);
+    var leitura = byKey[key];
+    p.lido = !!leitura;
+    p.dataLeitura = leitura ? (leitura.lidaEm || '') : '';
+    p.pdfUrl = ''; // Sprint 1: sem drive/pdf
+    p.versao = String(p.versao || '1.0');
+    return p;
+  });
+}
+
+/** Garante string/JSON-safe para google.script.run (evita Date da planilha quebrar a serialização). */
+function valueForClientJson_(v) {
+  if (v == null || v === '') return '';
+  if (Object.prototype.toString.call(v) === '[object Date]') {
+    if (isNaN(v.getTime())) return '';
+    try {
+      return Utilities.formatDate(v, Session.getScriptTimeZone(), 'yyyy-MM-dd');
+    } catch (e) {
+      return String(v);
+    }
+  }
+  return String(v);
+}
+
+function conteudoObjClientSafe_(obj) {
+  try {
+    return JSON.parse(JSON.stringify(obj == null ? {} : obj));
+  } catch (e) {
+    return {};
+  }
+}
+
+function toPortalPopCompat_(p) {
+  // mantém nomes esperados no HTML atual: id/codigo/versao/status/criticidade/...
+  var cj = conteudoObjClientSafe_(p.conteudoObj || {});
+  return {
+    id: p.popId,
+    autorUserId: String(p.autorUserId || ''),
+    codigo: p.numero,
+    titulo: p.titulo,
+    area: p.area,
+    processo: p.processo,
+    tipo: p.tipo || 'colaborativo',
+    origem: String(p.origem || ''),
+    versao: p.versao || '1.0',
+    status: p.status,
+    criticidade: p.criticidade,
+    publicoAlvo: p.publicoAlvo || 'todos',
+    leituraObrigatoria: !!p.leituraObrigatoria,
+    treinamentoObrigatorio: !!p.treinamentoObrigatorio,
+    lido: !!p.lido,
+    dataLeitura: valueForClientJson_(p.dataLeitura),
+    revisaoPrevista: valueForClientJson_(p.revisaoPrevista),
+    vigenciaInicio: valueForClientJson_(p.vigenciaInicio),
+    pdfUrl: '',
+    conteudoObj: cj,
+    // compat antigos
+    payload: cj,
+  };
+}
+
+function toPortalPopDetailCompat_(p) {
+  // Mesma regra da lista: conteúdo só via clone JSON-safe (não repor p.conteudoObj cru).
+  var c = conteudoObjClientSafe_(p.conteudoObj || {});
+  var base = toPortalPopCompat_(p);
+  base.resumoAlteracao = String(c.resumoAlteracao || '');
+  base.motivoRevisao = String(c.motivoRevisao || '');
+  base.anexos = Array.isArray(c.anexos) ? c.anexos : [];
+  base.documentosRelacionados = Array.isArray(c.documentosRelacionados) ? c.documentosRelacionados : [];
+  base.formulariosRelacionados = Array.isArray(c.formulariosRelacionados) ? c.formulariosRelacionados : [];
+  base.documentosRelacionadosReferencias = Array.isArray(c.documentosRelacionadosReferencias) ? c.documentosRelacionadosReferencias : [];
+  base.formulariosRelacionadosReferencias = Array.isArray(c.formulariosRelacionadosReferencias) ? c.formulariosRelacionadosReferencias : [];
+  base.checklistObj = Array.isArray(c.checklist) ? c.checklist : [];
+  base.conteudoObj = c;
+  base.payload = c;
+  base.autorNome = String(c.autorNome || '');
+  base.tipo = p.tipo || 'colaborativo';
+  base.origem = String(p.origem || '');
+  return base;
+}
+
+function isLikelyRealDocumentLink_(s) {
+  var t = normalizeText_(s);
+  if (!t) return false;
+  if (/^https?:\/\//i.test(t)) return true;
+  if (/drive\.google\.com|docs\.google\.com|sheets\.google\.com|forms\.gle|forms\.google\.com/i.test(t)) return true;
+  return false;
+}
+
+function partitionDocLinksAndRefs_(stringArr) {
+  var links = [];
+  var refs = [];
+  (stringArr || []).forEach(function (s) {
+    var t = normalizeText_(s);
+    if (!t) return;
+    if (isLikelyRealDocumentLink_(t)) links.push(t);
+    else refs.push(t);
+  });
+  return { links: links, refs: refs };
+}
+
+function findNomePrimeiroUsuarioAtivoPerfil_(perfilWanted) {
+  var sheet = getSheet_(SHEET_USUARIOS);
+  var rows = listRows_(sheet).filter(function (u) {
+    return String(u.ativo).toLowerCase() !== 'false' && normalizePerfil_(u.perfil) === perfilWanted;
+  });
+  if (!rows.length) return '';
+  return normalizeText_(rows[0].nome || rows[0].usuario || '');
+}
+
+function computeGovernancaDefaults_(user) {
+  var perfil = normalizePerfil_(user.perfil);
+  var nomeUser = normalizeText_(user.nome || user.usuario || user.email || '');
+  var dono = nomeUser || 'Responsável pela versão';
+  var apr = '';
+  if (perfil === 'diretor') {
+    // Evita colisão "autor == aprovador esperado" no POP crítico quando o próprio diretor cria o documento.
+    var outroDir = findNomePrimeiroUsuarioAtivoPerfilDiferenteDe_('diretor', nomeUser);
+    apr = outroDir || 'Diretoria — revisão independente';
+  } else if (perfil === 'gerente') apr = findNomePrimeiroUsuarioAtivoPerfil_('diretor') || 'Diretor';
+  else apr = findNomePrimeiroUsuarioAtivoPerfil_('gerente') || 'Gerente';
+  return { autorNome: nomeUser || 'Autor', donoDocumento: dono, aprovadorEsperado: apr };
+}
+
+function findNomePrimeiroUsuarioAtivoPerfilDiferenteDe_(perfilWanted, nomeExcluir) {
+  var alvo = iaBagNorm_(nomeExcluir || '');
+  var sheet = getSheet_(SHEET_USUARIOS);
+  var rows = listRows_(sheet).filter(function (u) {
+    return String(u.ativo).toLowerCase() !== 'false' && normalizePerfil_(u.perfil) === perfilWanted;
+  });
+  for (var i = 0; i < rows.length; i++) {
+    var n = normalizeText_(rows[i].nome || rows[i].usuario || '');
+    if (!n) continue;
+    if (alvo && iaBagNorm_(n) === alvo) continue;
+    return n;
+  }
+  return '';
+}
+
+function resolveProcessoForArea_(area, processoInformado, catalog) {
+  var a = normalizeText_(area);
+  var p = normalizeText_(processoInformado);
+  var list = (catalog || []).filter(function (x) { return normalizeText_(x.area) === a; }).map(function (x) { return normalizeText_(x.processo); });
+  if (p && list.indexOf(p) >= 0) return { processo: p, needsReview: false };
+  // Texto vindo do POP/JSON: aceitar sem marcar revisão (evita fricção; catálogo é guia, não bloqueio).
+  if (p) return { processo: p, needsReview: false };
+  if (!p && list.length) return { processo: list[0], needsReview: false };
+  return { processo: p, needsReview: false };
+}
+
+function normalizePopJsonPayload_(user, incoming) {
+  // Aceita tanto payload "flat" do HTML atual quanto "conteudoJson" estruturado.
+  var obj = incoming || {};
+
+  // Se vier "payload" ou "conteudoObj", considerar como conteudoJson principal
+  var contentCandidate = obj.conteudoJson || obj.conteudoObj || obj.payload || null;
+  if (typeof contentCandidate === 'string') contentCandidate = safeJsonParse_(contentCandidate) || {};
+  if (!contentCandidate || typeof contentCandidate !== 'object') contentCandidate = {};
+
+  var tipoPop = normalizeTipoPop_(obj.tipo || contentCandidate.tipo || 'colaborativo');
+
+  var area = normalizeText_(obj.area || contentCandidate.area || '');
+  var processoRaw = normalizeText_(obj.processo || contentCandidate.processo || '');
+  var catalog = getProcessosCatalog_();
+  var procResolved = resolveProcessoForArea_(area, processoRaw, catalog);
+
+  var docFlat = normalizeStringArray_(obj.documentosRelacionados || contentCandidate.documentosRelacionados || []);
+  var formFlat = normalizeStringArray_(obj.formulariosRelacionados || contentCandidate.formulariosRelacionados || []);
+  var docP = partitionDocLinksAndRefs_(docFlat);
+  var formP = partitionDocLinksAndRefs_(formFlat);
+  var gov = computeGovernancaDefaults_(user);
+
+  var errosComunsArr = normalizeStringArray_(obj.errosComuns || contentCandidate.errosComuns || []);
+  var proibidoArr = normalizeStringArray_(obj.proibido || contentCandidate.proibido || []);
+  if (!proibidoArr.length && errosComunsArr.length) proibidoArr = errosComunsArr.slice();
+
+  var pontosDeAtencaoArr = normalizeStringArray_(obj.pontosDeAtencao || contentCandidate.pontosDeAtencao || []);
+  var pontosCriticosArr = normalizeStringArray_(obj.pontos_criticos || contentCandidate.pontos_criticos || []);
+  if (!pontosCriticosArr.length && pontosDeAtencaoArr.length) pontosCriticosArr = pontosDeAtencaoArr.slice();
+
+  var procedimentoRaw = obj.procedimento !== undefined ? obj.procedimento : contentCandidate.procedimento;
+  var procedimentoOut =
+    tipoPop === 'critico'
+      ? normalizeProcedimentoCriticoLista_(procedimentoRaw || [])
+      : normalizeStringArray_(procedimentoRaw || []);
+  var freqRaw = obj.frequencia !== undefined ? obj.frequencia : contentCandidate.frequencia;
+  var frequenciaOut =
+    tipoPop === 'critico' ? normalizeFrequenciaCritico_(freqRaw || '') : normalizeText_(freqRaw || '');
+
+  // O HTML atual manda um objeto gigante "flat"; vamos montar um conteudoJson coerente.
+  var conteudoJson = {
+    diretriz_executiva: normalizeText_(obj.diretriz_executiva || contentCandidate.diretriz_executiva || ''),
+    objetivo: normalizeText_(obj.objetivo || contentCandidate.objetivo || ''),
+    escopo: normalizeText_(obj.escopo || contentCandidate.escopo || ''),
+    responsaveis: normalizeStringArray_(obj.responsaveis || contentCandidate.responsaveis || []),
+    materiais_epi: normalizeStringArray_(obj.materiais_epi || contentCandidate.materiais_epi || []),
+    regra_de_ouro: normalizeText_(obj.regra_de_ouro || contentCandidate.regra_de_ouro || ''),
+    frequencia: frequenciaOut,
+    procedimento: procedimentoOut,
+    errosComuns: errosComunsArr,
+    pontosDeAtencao: pontosDeAtencaoArr,
+    proibido: proibidoArr,
+    pontos_criticos: pontosCriticosArr,
+    checklist_lider: normalizeStringArray_(obj.checklist_lider || contentCandidate.checklist_lider || []),
+    checklist: normalizeStringArray_(obj.checklist || contentCandidate.checklist || []),
+    desvios: normalizeStringArray_(obj.desvios || contentCandidate.desvios || []),
+    metrica: normalizeText_(obj.metrica || contentCandidate.metrica || ''),
+    treinamento: normalizeText_(obj.treinamento || contentCandidate.treinamento || ''),
+    como_fazer_bem: normalizeText_(
+      obj.como_fazer_bem ||
+        obj.comoFazerBem ||
+        contentCandidate.como_fazer_bem ||
+        contentCandidate.comoFazerBem ||
+        ''
+    ),
+    erro_critico: normalizeText_(
+      obj.erro_critico || obj.erroCritico || contentCandidate.erro_critico || contentCandidate.erroCritico || ''
+    ),
+
+    // metadados "do documento" também ficam governáveis no JSON
+    versao: normalizeText_(obj.versao || contentCandidate.versao || '1.0'),
+    publicoAlvo: normalizePerfil_(obj.publicoAlvo || contentCandidate.publicoAlvo || 'todos'),
+    resumoAlteracao: normalizeText_(obj.resumoAlteracao || contentCandidate.resumoAlteracao || 'Criação inicial'),
+    motivoRevisao: normalizeText_(obj.motivoRevisao || contentCandidate.motivoRevisao || ''),
+    anexos: normalizeStringArray_(obj.anexos || contentCandidate.anexos || []),
+    documentosRelacionados: docP.links,
+    documentosRelacionadosReferencias: docP.refs,
+    formulariosRelacionados: formP.links,
+    formulariosRelacionadosReferencias: formP.refs,
+    processoRevisaoPendente: procResolved.needsReview,
+    autorNome: normalizeText_(obj.autorNome || contentCandidate.autorNome || '') || gov.autorNome,
+    donoDocumento: normalizeText_(obj.donoDocumento || contentCandidate.donoDocumento || '') || gov.donoDocumento,
+    aprovadorEsperado: normalizeText_(obj.aprovador || contentCandidate.aprovador || contentCandidate.aprovadorEsperado || '') || gov.aprovadorEsperado,
+    tipoFluxo: tipoPop,
+  };
+
+  return {
+    popId: normalizeText_(obj.popId || obj.id || contentCandidate.popId || ''),
+    numero: normalizeText_(obj.numero || obj.codigo || contentCandidate.numero || contentCandidate.codigo || ''),
+    versao: normalizeText_(obj.versao || contentCandidate.versao || '1.0'),
+    titulo: normalizeText_(obj.titulo || contentCandidate.titulo || ''),
+    area: area,
+    processo: procResolved.processo,
+    criticidade: normalizeCriticidade_(obj.criticidade || contentCandidate.criticidade || 'media'),
+    // Importante: não defaultar para rascunho quando status vier ausente no payload (edição preserva status no updatePopDraft_).
+    status: (function () {
+      var raw = obj.status != null ? String(obj.status) : contentCandidate.status != null ? String(contentCandidate.status) : '';
+      raw = normalizeText_(raw);
+      if (!raw) return '';
+      return normalizeStatus_(raw);
+    })(),
+    exclusivoFarmaceutico: normalizeBoolean_(obj.exclusivoFarmaceutico || false),
+    leituraObrigatoria: obj.leituraObrigatoria !== undefined ? normalizeBoolean_(obj.leituraObrigatoria) : true,
+    treinamentoObrigatorio: obj.treinamentoObrigatorio !== undefined ? normalizeBoolean_(obj.treinamentoObrigatorio) : true,
+    publicoAlvo: normalizePerfil_(obj.publicoAlvo || contentCandidate.publicoAlvo || 'todos'),
+    tags: normalizeText_(obj.tags || ''),
+    vigenciaInicio: (function () {
+      var v = normalizeText_(obj.vigenciaInicio || contentCandidate.vigenciaInicio || '');
+      return v || formatDateIso_(new Date());
+    })(),
+    revisaoPrevista: (function () {
+      var r = normalizeText_(obj.revisaoPrevista || contentCandidate.revisaoPrevista || '');
+      var crit = normalizeCriticidade_(obj.criticidade || contentCandidate.criticidade || 'media');
+      return r || computeRevisaoPrevista_(crit);
+    })(),
+    donoDocumento: conteudoJson.donoDocumento,
+    aprovador: conteudoJson.aprovadorEsperado,
+    autorNome: conteudoJson.autorNome,
+    conteudoJson: conteudoJson,
+    conteudoHtmlGerado: '', // derivado opcional
+    tipo: tipoPop,
+    origem: normalizeOrigemPop_(obj.origem || contentCandidate.origem || ''),
+  };
+}
+
+function generatePopNumeroForFamily_(popId) {
+  // numero estável por família: persiste no Parametros (popId -> numero)
+  var key = 'POP_NUMERO_FOR_' + String(popId);
+  var existing = getParam_(key);
+  if (existing) return existing;
+
+  var seq = parseInt(getParam_('POP_NUM_SEQ') || '0', 10);
+  if (!seq || seq < 0) seq = 0;
+  seq++;
+  setParam_('POP_NUM_SEQ', String(seq));
+
+  var numero = 'POP-' + String(seq).padStart(4, '0');
+  setParam_(key, numero);
+  return numero;
+}
+
+function computeRevisaoPrevista_(criticidade) {
+  var crit = normalizeCriticidade_(criticidade);
+  var days = 90;
+  if (crit === 'critica') days = 30;
+  else if (crit === 'alta') days = 60;
+  else days = 90;
+  var d = new Date();
+  d.setDate(d.getDate() + days);
+  return formatDateIso_(d);
+}
+
+// =============================================================================
+// Core: Leituras
+// =============================================================================
+
+function confirmRead_(user, pop) {
+  var existing = getReadForUserAndVersion_(user.id || user.userId || '', pop.popId, pop.versaoId);
+  if (existing) return existing;
+
+  var sheet = getSheet_(SHEET_LEITURAS);
+  var headers = getHeaders_(sheet);
+
+  var now = new Date();
+  var leitura = {
+    leituraId: uuid_(),
+    userId: String(user.id || user.userId || ''),
+    popId: String(pop.popId),
+    versaoId: String(pop.versaoId),
+    lidaEm: now,
+    expiraEm: '', // Sprint 4 pode usar expiração de leitura
+    confirmacao: true,
+    observacao: '',
+  };
+  appendRowObj_(sheet, headers, leitura);
+  return leitura;
+}
+
+function getReadForUserAndVersion_(userId, popId, versaoId) {
+  var reads = listRows_(getSheet_(SHEET_LEITURAS));
+  return reads.find(function (r) {
+    return String(r.userId || '') === String(userId) &&
+      String(r.popId || '') === String(popId) &&
+      String(r.versaoId || '') === String(versaoId);
+  }) || null;
+}
+
+function listMyPendingReads_(user) {
+  var pops = getPopsLibraryForUser_(user).filter(function (p) {
+    return p.status === 'vigente' && !!p.leituraObrigatoria && !p.lido;
+  });
+  return pops.map(function (p) {
+    return {
+      popId: p.popId,
+      versaoId: p.versaoId,
+      numero: p.numero,
+      titulo: p.titulo,
+      criticidade: p.criticidade,
+    };
+  });
+}
+
+function listPendingCriticalReads_(user) {
+  return getPopsLibraryForUser_(user)
+    .filter(function (p) {
+      return p.status === 'vigente' &&
+        !!p.leituraObrigatoria &&
+        !p.lido &&
+        String(p.criticidade) === 'critica';
+    })
+    .map(function (p) {
+      return { popId: p.popId, versaoId: p.versaoId, numero: p.numero, titulo: p.titulo };
+    });
+}
+
+// =============================================================================
+// Portal Stats / Dashboard helpers
+// =============================================================================
+
+function computePortalStats_(user, pops) {
+  var total = pops.length;
+  var vigentes = pops.filter(function (p) { return p.status === 'vigente'; });
+  var totalVigentes = vigentes.length;
+  var criticosVigentes = vigentes.filter(function (p) { return p.criticidade === 'critica' || p.criticidade === 'alta'; }).length;
+  var lidos = vigentes.filter(function (p) { return p.lido; }).length;
+  var pendentes = vigentes.filter(function (p) { return p.leituraObrigatoria && !p.lido; }).length;
+
+  return {
+    total: totalVigentes,
+    totalVigentes: totalVigentes,
+    totalBiblioteca: total,
+    criticos: criticosVigentes,
+    criticosVigentes: criticosVigentes,
+    lidos: lidos,
+    pendentes: pendentes,
+  };
+}
+
+function countActiveUsers_() {
+  var users = listRows_(getSheet_(SHEET_USUARIOS));
+  return users.filter(function (u) { return String(u.ativo).toLowerCase() !== 'false'; }).length;
+}
+
+function safeBuildRankingConformidade_(viewer) {
+  try {
+    return buildRankingConformidade_(viewer);
+  } catch (e) {
+    popDiagLog_('buildRankingConformidade.error', { err: String(e && e.message ? e.message : e) });
+    return [];
+  }
+}
+
+function buildRankingConformidade_(viewer) {
+  // ranking simples Sprint 1: % de POPs vigentes obrigatórios lidos
+  var users = listRows_(getSheet_(SHEET_USUARIOS)).filter(function (u) { return String(u.ativo).toLowerCase() !== 'false'; });
+  if (viewer && normalizePerfil_(viewer.perfil) === 'gerente') {
+    users = users.filter(function (u) { return normalizePerfil_(u.perfil) !== 'diretor'; });
+  }
+  var allPops = listRows_(getSheet_(SHEET_POPS)).map(function (r) { return normalizePopRow_(r); });
+  var vigentesObrig = allPops.filter(function (p) { return p.status === 'vigente' && !!p.leituraObrigatoria; });
+  var reads = listRows_(getSheet_(SHEET_LEITURAS));
+
+  var out = users.map(function (u) {
+    var userObj = { id: String(u.id || u.userId || ''), perfil: normalizePerfil_(u.perfil) };
+    var popsForUser = vigentesObrig.filter(function (p) { return canViewPop_(userObj, p); });
+    var total = popsForUser.length;
+    var lidos = popsForUser.filter(function (p) {
+      return reads.find(function (r) {
+        return String(r.userId) === String(userObj.id) &&
+          String(r.popId) === String(p.popId) &&
+          String(r.versaoId) === String(p.versaoId);
+      });
+    }).length;
+    var percentual = total ? Math.round((lidos / total) * 100) : 100;
+    return {
+      usuarioNome: String(u.nome || ''),
+      lidos: lidos,
+      obrigatorios: total,
+      percentual: percentual,
+    };
+  });
+
+  out.sort(function (a, b) { return (b.percentual - a.percentual) || a.usuarioNome.localeCompare(b.usuarioNome); });
+  return out;
+}
+
+function buildMeusPendentes_(user) {
+  var pending = listMyPendingReads_(user);
+  return pending.slice(0, 8).map(function (p) {
+    return { titulo: p.titulo, criticidade: p.criticidade };
+  });
+}
+
+// =============================================================================
+// Schema / DB helpers
+// =============================================================================
+
+function ensureSchema_() {
+  var ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+  ensureSheet_(ss, SHEET_USUARIOS, [
+    'id', 'email', 'nome', 'usuario', 'senha', 'perfil', 'ativo', 'criadoEm', 'atualizadoEm', 'codigo',
+  ]);
+  backfillUsuarioCodigos_();
+
+  // Sprint 1 (ajuste obrigatório): sessões enxutas + usuario (login estável após troca manual de id)
+  ensureSheet_(ss, SHEET_SESSOES, [
+    'sessionId', 'userId', 'email', 'criadoEm', 'expiraEm', 'revogadoEm', 'usuario',
+  ]);
+
+  ensureSheet_(ss, SHEET_POPS, [
+    'popId',
+    'versaoId',
+    'numero',
+    'versao',
+    'titulo',
+    'area',
+    'processo',
+    'criticidade',
+    'status',
+    'exclusivoFarmaceutico',
+    'leituraObrigatoria',
+    'treinamentoObrigatorio',
+    'publicoAlvo',
+    'tags',
+    'vigenciaInicio',
+    'revisaoPrevista',
+    'autorUserId',
+    'autorEmail',
+    'criadoEm',
+    'atualizadoEm',
+    'conteudoJson',
+    'conteudoHtmlGerado',
+    'drivePdfFileId',
+    'driveFolderAnexosId',
+    'tipo',
+    'origem',
+  ]);
+
+  ensureSheet_(ss, SHEET_LEITURAS, [
+    'leituraId',
+    'userId',
+    'popId',
+    'versaoId',
+    'lidaEm',
+    'expiraEm',
+    'confirmacao',
+    'observacao',
+  ]);
+
+  ensureSheet_(ss, SHEET_PARAMETROS, ['chave', 'valor', 'atualizadoEm']);
+  ensureSheet_(ss, SHEET_AUDITORIA, ['eventoId', 'quando', 'userId', 'acao', 'entidade', 'entidadeId', 'detalhesJson']);
+  ensureSheet_(ss, SHEET_LOGS_FLUXO, [
+    'id',
+    'userId',
+    'acao',
+    'etapa',
+    'status',
+    'mensagem',
+    'tipo',
+    'origem',
+    'popId',
+    'timestamp',
+    'payloadResumo',
+  ]);
+
+  seedDefaultAdminIfEmpty_(ss);
+}
+
+function seedDefaultAdminIfEmpty_(ss) {
+  var sh = ss.getSheetByName(SHEET_USUARIOS);
+  var data = sh.getDataRange().getValues();
+  if (data.length > 1) return;
+
+  // Usuário inicial: diretor / admin
+  var headers = data[0];
+  var userId = uuid_();
+  var row = objToRow_(headers, {
+    id: userId,
+    email: '',
+    nome: 'Diretor (Admin)',
+    usuario: 'admin',
+    senha: 'admin',
+    perfil: 'diretor',
+    ativo: true,
+    criadoEm: new Date(),
+    atualizadoEm: new Date(),
+    codigo: '1',
+  });
+  sh.appendRow(row);
+}
+
+function loginMatchesUsuarioCodigo_(loginInput, codigoCell) {
+  var raw = String(codigoCell != null ? codigoCell : '').trim();
+  if (!raw && codigoCell != null && typeof codigoCell === 'number') raw = String(codigoCell);
+  if (!raw) return false;
+  var login = String(loginInput || '').trim();
+  if (login === raw) return true;
+  if (/^\d+$/.test(login) && /^\d+$/.test(raw)) return parseInt(login, 10) === parseInt(raw, 10);
+  return false;
+}
+
+function maxUsuarioCodigoNumerico_(rows) {
+  var maxC = 0;
+  (rows || []).forEach(function (u) {
+    var c = String(u.codigo != null ? u.codigo : '').trim();
+    if (/^\d+$/.test(c)) {
+      var n = parseInt(c, 10);
+      if (!isNaN(n) && n > maxC) maxC = n;
+    }
+  });
+  return maxC;
+}
+
+function nextUsuarioCodigoDisponivel_() {
+  return maxUsuarioCodigoNumerico_(listRows_(getSheet_(SHEET_USUARIOS))) + 1;
+}
+
+function backfillUsuarioCodigos_() {
+  var sheet = getSheet_(SHEET_USUARIOS);
+  var headers = getHeaders_(sheet);
+  if (headers.indexOf('codigo') < 0) return;
+  var rows = listRowsWithRowIndex_(sheet);
+  var next = maxUsuarioCodigoNumerico_(rows.map(function (r) { return r.obj; })) + 1;
+  rows.forEach(function (r) {
+    var c = String(r.obj.codigo != null ? r.obj.codigo : '').trim();
+    if (c) return;
+    setCell_(sheet, r.rowIndex, 'codigo', String(next));
+    next++;
+  });
+}
+
+function ensureSheet_(ss, name, headers) {
+  var sh = ss.getSheetByName(name);
+  if (!sh) sh = ss.insertSheet(name);
+  var range = sh.getDataRange();
+  var values = range.getValues();
+  if (values.length === 0) {
+    sh.getRange(1, 1, 1, headers.length).setValues([headers]);
+    return;
+  }
+  if (values.length === 1 && values[0].length === 1 && values[0][0] === '') {
+    sh.getRange(1, 1, 1, headers.length).setValues([headers]);
+    return;
+  }
+
+  var existingHeaders = values[0].map(function (h) { return String(h || '').trim(); });
+  var needsWrite = false;
+  headers.forEach(function (h, idx) {
+    if (existingHeaders[idx] !== h) needsWrite = true;
+  });
+
+  // Se for uma sheet nova ou inconsistente, força cabeçalho na primeira linha.
+  if (needsWrite) {
+    sh.getRange(1, 1, 1, headers.length).setValues([headers]);
+  }
+}
+
+function getSheet_(name) {
+  var ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+  var sh = ss.getSheetByName(name);
+  if (!sh) throw new Error('Aba não encontrada: ' + name);
+  return sh;
+}
+
+function getHeaders_(sheet) {
+  var lastCol = sheet.getLastColumn();
+  if (lastCol < 1) return [];
+  var values = sheet.getRange(1, 1, 1, lastCol).getValues();
+  return (values[0] || []).map(function (h, idx) {
+    var s = String(h || '').trim();
+    // NUNCA remover coluna: célula vazia no cabeçalho deslocava popId/titulo e “sumia” POP na leitura.
+    return s || '_col' + (idx + 1);
+  });
+}
+
+function listRows_(sheet) {
+  var lastRow = sheet.getLastRow();
+  if (lastRow < 2) return [];
+  var headers = getHeaders_(sheet);
+  var lastCol = Math.max(sheet.getLastColumn(), headers.length);
+  var values = sheet.getRange(2, 1, lastRow, lastCol).getValues();
+  return values
+    .filter(function (row) { return row.some(function (c) { return c !== '' && c !== null; }); })
+    .map(function (row) { return rowToObj_(headers, row); });
+}
+
+function listRowsWithRowIndex_(sheet) {
+  var lastRow = sheet.getLastRow();
+  if (lastRow < 2) return [];
+  var headers = getHeaders_(sheet);
+  var lastCol = Math.max(sheet.getLastColumn(), headers.length);
+  var values = sheet.getRange(2, 1, lastRow, lastCol).getValues();
+  var out = [];
+  for (var i = 0; i < values.length; i++) {
+    var row = values[i];
+    if (!row.some(function (c) { return c !== '' && c !== null; })) continue;
+    out.push({ rowIndex: i + 2, obj: rowToObj_(headers, row) });
+  }
+  return out;
+}
+
+function appendRowObj_(sheet, headers, obj) {
+  sheet.appendRow(objToRow_(headers, obj));
+}
+
+function applyRowPatch_(sheet, rowIndex, patchObj) {
+  var headers = getHeaders_(sheet);
+  var lastCol = Math.max(sheet.getLastColumn(), headers.length);
+  var current = rowToObj_(headers, sheet.getRange(rowIndex, 1, 1, lastCol).getValues()[0]);
+  var merged = merge_(current, patchObj);
+  sheet.getRange(rowIndex, 1, 1, lastCol).setValues([objToRow_(headers, merged)]);
+}
+
+function setCell_(sheet, rowIndex, headerName, value) {
+  var headers = getHeaders_(sheet);
+  var idx = headers.indexOf(headerName);
+  if (idx < 0) return;
+  sheet.getRange(rowIndex, idx + 1).setValue(value);
+}
+
+function rowToObj_(headers, row) {
+  var obj = {};
+  for (var i = 0; i < headers.length; i++) {
+    obj[headers[i]] = row[i];
+  }
+  return obj;
+}
+
+function objToRow_(headers, obj) {
+  return headers.map(function (h) { return obj[h] !== undefined ? obj[h] : ''; });
+}
+
+// =============================================================================
+// Parametros
+// =============================================================================
+
+function getParam_(key) {
+  var sheet = getSheet_(SHEET_PARAMETROS);
+  var rows = listRows_(sheet);
+  var match = rows.find(function (r) { return String(r.chave) === String(key); });
+  return match ? String(match.valor || '') : '';
+}
+
+function setParam_(key, value) {
+  var sheet = getSheet_(SHEET_PARAMETROS);
+  var rows = listRowsWithRowIndex_(sheet);
+  var match = rows.find(function (r) { return String(r.obj.chave) === String(key); });
+  var now = new Date();
+  if (match) {
+    applyRowPatch_(sheet, match.rowIndex, { chave: key, valor: String(value || ''), atualizadoEm: now });
+    return;
+  }
+  appendRowObj_(sheet, getHeaders_(sheet), { chave: key, valor: String(value || ''), atualizadoEm: now });
+}
+
+// =============================================================================
+// Auditoria
+// =============================================================================
+
+function logAudit_(user, acao, entidade, entidadeId, details) {
+  var sheet = getSheet_(SHEET_AUDITORIA);
+  var headers = getHeaders_(sheet);
+  var row = {
+    eventoId: uuid_(),
+    quando: new Date(),
+    userId: String(user && (user.id || user.userId) || ''),
+    acao: String(acao || ''),
+    entidade: String(entidade || ''),
+    entidadeId: String(entidadeId || ''),
+    detalhesJson: JSON.stringify(details || {}),
+  };
+  appendRowObj_(sheet, headers, row);
+}
+
+/** Resumo curto para coluna payloadResumo (máx. 500 caracteres). */
+function fluxoResumoPayloadMax500_(v) {
+  var s = '';
+  if (v == null) s = '';
+  else if (typeof v === 'string') s = v;
+  else {
+    try {
+      s = JSON.stringify(v);
+    } catch (e) {
+      s = String(v);
+    }
+  }
+  s = String(s);
+  if (s.length <= 500) return s;
+  return s.substring(0, 499) + '…';
+}
+
+/**
+ * Log append-only na aba LogsFluxo (trilha colaborativa).
+ * acao: copiar_prompt | validacao_json | salvar_rascunho | enviar_aprovacao | erro_fluxo_colaborativo | pop_input_abandonado
+ * etapa (funil POP): input | preview | aprovacao
+ */
+function logFluxo_(user, fields) {
+  fields = fields || {};
+  try {
+    ensureSchema_();
+    var sheet = getSheet_(SHEET_LOGS_FLUXO);
+    var headers = getHeaders_(sheet);
+    var row = {
+      id: uuid_(),
+      userId: String(user && (user.id || user.userId) || ''),
+      acao: String(fields.acao || ''),
+      etapa: String(fields.etapa || ''),
+      status: String(fields.status || ''),
+      mensagem: String(fields.mensagem != null ? fields.mensagem : '').substring(0, 2000),
+      tipo: String(fields.tipo || ''),
+      origem: String(fields.origem || ''),
+      popId: String(fields.popId || ''),
+      timestamp: new Date(),
+      payloadResumo: fluxoResumoPayloadMax500_(fields.payloadResumo != null ? fields.payloadResumo : ''),
+    };
+    appendRowObj_(sheet, headers, row);
+  } catch (e) {
+    try {
+      Logger.log('[logFluxo_] ' + String(e && e.message ? e.message : e));
+    } catch (e2) {}
+  }
+}
+
+/** Compat HTML: registra evento da trilha (ex.: copiar_prompt no cliente). */
+function registrarLogFluxoColaborativo(token, partial) {
+  try {
+    ensureSchema_();
+    var ctx = requireSession_(token);
+    assertCan_(ctx.user, 'POP_CREATE_DRAFT');
+    partial = partial || {};
+    logFluxo_(ctx.user, {
+      acao: partial.acao,
+      etapa: partial.etapa,
+      status: partial.status,
+      mensagem: partial.mensagem,
+      tipo: partial.tipo,
+      origem: partial.origem,
+      popId: partial.popId,
+      payloadResumo: partial.payloadResumo,
+    });
+    return { ok: true };
+  } catch (e) {
+    try {
+      Logger.log('[registrarLogFluxoColaborativo] ' + String(e && e.message ? e.message : e));
+    } catch (e2) {}
+    return { ok: false, message: String(e && e.message ? e.message : e) };
+  }
+}
+
+/** Normaliza etapa do funil enviada pelo cliente (abandono). */
+function normalizarEtapaAbandonoFluxo_(v) {
+  var s = String(v || '').trim().toLowerCase();
+  if (s === 'preview' || s === 'aprovacao') return s;
+  return 'input';
+}
+
+/** Abandono mínimo do bloco de entrada da IA (sem novo sistema de eventos). */
+function registrarPopInputAbandonadoIa(token, tempoSegundos, etapaFluxo) {
+  try {
+    ensureSchema_();
+    var ctx = requireSession_(token);
+    assertCan_(ctx.user, 'POP_CREATE_DRAFT');
+    var sec = Math.max(0, Math.floor(Number(tempoSegundos) || 0));
+    var etapaLog = normalizarEtapaAbandonoFluxo_(etapaFluxo);
+    var u = ctx.user || {};
+    logFluxo_(ctx.user, {
+      acao: 'pop_input_abandonado',
+      etapa: etapaLog,
+      status: 'ok',
+      mensagem: '',
+      tipo: 'ia_conceito',
+      origem: 'geracao_ia_conceito',
+      popId: '',
+      payloadResumo: {
+        usuario: String(u.nome || u.usuario || u.email || u.id || u.userId || ''),
+        tempo_ate_abandono: sec,
+        versao_prompt: IA_POP_PROMPT_VERSAO_,
+      },
+    });
+    return { ok: true };
+  } catch (e) {
+    try {
+      Logger.log('[registrarPopInputAbandonadoIa] ' + String(e && e.message ? e.message : e));
+    } catch (e2) {}
+    return { ok: false, message: String(e && e.message ? e.message : e) };
+  }
+}
+
+// =============================================================================
+// Utils: normalize / dates / json / envelope
+// =============================================================================
+
+function ok_(data) {
+  return { ok: true, data: data };
+}
+
+function fail_(code, message, details) {
+  return { ok: false, error: { code: code, message: message, details: details || null } };
+}
+
+function okCompat_(obj) {
+  // compat com HTML atual que espera { ok: true, ... }
+  var out = clone_(obj || {});
+  out.ok = true;
+  return out;
+}
+
+function uuid_() {
+  return Utilities.getUuid();
+}
+
+function normalizeText_(v) {
+  if (v === null || v === undefined) return '';
+  return String(v).replace(/\r\n/g, '\n').replace(/\r/g, '\n').trim();
+}
+
+/** Converte item de lista (string ou objeto vindo de JSON/IA) em texto único — evita "[object Object]". */
+function stringifyMixedContentItem_(x) {
+  if (x === null || x === undefined) return '';
+  if (typeof x === 'string' || typeof x === 'number' || typeof x === 'boolean') return String(x).trim();
+  if (typeof x !== 'object') return String(x);
+  if (Array.isArray(x)) {
+    return x
+      .map(function (y) {
+        return stringifyMixedContentItem_(y);
+      })
+      .filter(Boolean)
+      .join(' — ');
+  }
+  var keys = [
+    'texto',
+    'descricao',
+    'descricao_passo',
+    'passo',
+    'item',
+    'titulo',
+    'conteudo',
+    'label',
+    'detalhe',
+    'acao',
+    'nome',
+    'valor',
+  ];
+  for (var i = 0; i < keys.length; i++) {
+    var k = keys[i];
+    if (!Object.prototype.hasOwnProperty.call(x, k)) continue;
+    var v = x[k];
+    if (v === null || v === undefined || v === '') continue;
+    if (typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean') return String(v).trim();
+    if (typeof v === 'object') {
+      var inner = stringifyMixedContentItem_(v);
+      if (inner) return inner;
+    }
+  }
+  try {
+    return JSON.stringify(x);
+  } catch (e) {
+    return '';
+  }
+}
+
+function normalizePerfil_(p) {
+  return String(p || '')
+    .trim()
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '');
+}
+
+function normalizeStatus_(v) {
+  var value = String(v || '').toLowerCase().trim();
+  if (value.indexOf('vigente') >= 0 || value.indexOf('aprovado') >= 0 || value.indexOf('publicado') >= 0) return 'vigente';
+  if (value.indexOf('aguardando') >= 0 && value.indexOf('diretor') >= 0) return 'aguardando_diretor';
+  if (value.indexOf('revis') >= 0) return 'em revisão';
+  if (value.indexOf('em_aprov') >= 0) return 'em_aprovacao';
+  if (value.indexOf('reprov') >= 0) return 'reprovado';
+  return 'rascunho';
+}
+
+function normalizeCriticidade_(v) {
+  var value = String(v || '').toLowerCase().trim();
+  if (value.indexOf('crit') >= 0) return 'critica';
+  if (value.indexOf('alta') >= 0) return 'alta';
+  if (value.indexOf('baixa') >= 0) return 'baixa';
+  return 'media';
+}
+
+function normalizeBoolean_(v) {
+  if (v === true || v === false) return v;
+  return ['true', '1', 'sim', 'yes'].indexOf(String(v || '').toLowerCase().trim()) >= 0;
+}
+
+function normalizeStringArray_(v) {
+  if (Array.isArray(v)) {
+    return v.map(function (x) { return stringifyMixedContentItem_(x); }).filter(Boolean);
+  }
+  // se vier string grande (textarea), tenta quebrar por linha
+  var s = normalizeText_(v);
+  if (!s) return [];
+  if (s.indexOf('\n') >= 0) return s.split('\n').map(function (x) { return normalizeText_(x); }).filter(Boolean);
+  // se vier separado por vírgula
+  if (s.indexOf(',') >= 0) return s.split(',').map(function (x) { return normalizeText_(x); }).filter(Boolean);
+  return [s];
+}
+
+function safeJsonParse_(s) {
+  if (!s) return null;
+  try {
+    return JSON.parse(String(s));
+  } catch (e) {
+    return null;
+  }
+}
+
+function parseDateSafe_(value) {
+  if (!value) return null;
+  if (Object.prototype.toString.call(value) === '[object Date]' && !isNaN(value)) return value;
+  var d = new Date(value);
+  if (isNaN(d.getTime())) return null;
+  return d;
+}
+
+function formatDateIso_(date) {
+  var d = parseDateSafe_(date);
+  if (!d) return '';
+  var y = d.getFullYear();
+  var m = String(d.getMonth() + 1).padStart(2, '0');
+  var dd = String(d.getDate()).padStart(2, '0');
+  return y + '-' + m + '-' + dd;
+}
+
+function clone_(obj) {
+  var out = {};
+  for (var k in obj) out[k] = obj[k];
+  return out;
+}
+
+function merge_(a, b) {
+  var out = clone_(a || {});
+  for (var k in b) {
+    if (b[k] !== undefined) out[k] = b[k];
+  }
+  return out;
+}
+
+function indexBy_(arr, keyFn) {
+  var out = {};
+  (arr || []).forEach(function (x) { out[String(keyFn(x))] = x; });
+  return out;
+}
+
