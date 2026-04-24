@@ -2465,6 +2465,51 @@ function assertPortalPopMinimoSemanticoPersistencia_(normalized) {
   if (q) throw new Error(q);
 }
 
+/** Extrai situação/erro do objetivo pós-IA (bloco referência) ou do contrato. */
+function iaMotorExtrairSitErrParaErroCritico_(mergedIn, contract) {
+  var out = mergedIn || {};
+  var c = contract || {};
+  var o = String(out.objetivo || '');
+  var sit = '';
+  var err = '';
+  var mSit = o.match(/Situa[çc][aã]o:\s*([^\n\r]+)/i);
+  var mErr = o.match(/Erro ou risco:\s*([^\n\r]+)/i);
+  if (mSit) sit = normalizeText_(mSit[1]);
+  if (mErr) err = normalizeText_(mErr[1]);
+  if (!sit && c.contexto) {
+    var q = normalizeText_(c.contexto.quando_aplicar || '');
+    var strip = q.replace(/^Quando no piso ocorre:\s*/i, '').trim();
+    if (strip) sit = strip.slice(0, 220);
+  }
+  if (!err) {
+    var ctl = c.controle || {};
+    var eg = Array.isArray(ctl.erros_graves) ? ctl.erros_graves : [];
+    if (eg[0]) err = String(eg[0]).trim();
+  }
+  return { sit: sit, err: err };
+}
+
+/**
+ * Texto de erro crítico observável quando erros_graves não passa na heurística leve (verbo + piso).
+ * Ancorado em situação/erro do contrato ou do objetivo — sem afrouxar validação global.
+ */
+function iaMotorErroCriticoFallbackConcreto_(eg0, sit, err) {
+  var bag = iaBagNorm_(String(err || '') + ' ' + String(sit || '') + ' ' + String(eg0 || ''));
+  if (/fecho\s+de\s+caixa|caixa\s+com\s+diferen|dupla\s+contagem|contagem.*respons|registo\s+do\s+respons/.test(bag)) {
+    return 'Fechar o caixa com diferença sem conferir de novo o numerário e sem registrar o responsável no fecho.';
+  }
+  if (/obstru|passagem|corredor|mercador|reposi|gondol/.test(bag)) {
+    return 'Deixar caixa, produto ou material bloqueando a passagem do cliente no corredor ou junto ao balcão.';
+  }
+  if (/vencid|descarte|retirad|regist|prateleir|limpez/.test(bag)) {
+    return 'Manter produto fora da validade na prateleira ou retirar sem separar para a tratativa de descarte definida na loja.';
+  }
+  if (/fila|aguard|ordem|espera/.test(bag)) {
+    return 'Olhar para a fila no balcão sem chamar antes quem aguardava há mais tempo antes de iniciar o atendimento.';
+  }
+  return '';
+}
+
 function iaMotorPreencherComoFazerErroCriticoIncoming_(mergedIn, contract) {
   var out = mergedIn || {};
   var c = contract || {};
@@ -2483,6 +2528,24 @@ function iaMotorPreencherComoFazerErroCriticoIncoming_(mergedIn, contract) {
   }
   if (!String(out.erro_critico || '').trim()) {
     if (eg0) out.erro_critico = eg0;
+  }
+  var comoTxt = String(out.como_fazer_bem || '').trim();
+  var ec = String(out.erro_critico || '').trim();
+  if (ec && comoTxt) {
+    var vEc = iaMotorValidarComoFazerErroCriticoLeve_(comoTxt, ec);
+    if (vEc && vEc.indexOf('Erro crítico') >= 0) {
+      var ex = iaMotorExtrairSitErrParaErroCritico_(out, c);
+      var fb = iaMotorErroCriticoFallbackConcreto_(eg0, ex.sit, ex.err);
+      if (fb) out.erro_critico = fb;
+      else
+        out.erro_critico =
+          'Deixar de anotar no balcão o incidente reprovável e seguir sem corrigir na hora: ' + String(eg0 || 'risco operacional').slice(0, 130);
+      vEc = iaMotorValidarComoFazerErroCriticoLeve_(String(out.como_fazer_bem || '').trim(), String(out.erro_critico || '').trim());
+      if (vEc && vEc.indexOf('Erro crítico') >= 0) {
+        out.erro_critico =
+          'Verificar no balcão a omissão sem registrar o incidente ligado a: ' + String(eg0 || 'risco no piso').slice(0, 120);
+      }
+    }
   }
   return out;
 }
@@ -2562,7 +2625,10 @@ function iaMotorQaChecklistIncoming_(mergedIn, contract) {
     });
   }
 
-  var pre = iaMotorPreencherComoFazerErroCriticoIncoming_({ como_fazer_bem: m.como_fazer_bem, erro_critico: m.erro_critico }, c);
+  var pre = iaMotorPreencherComoFazerErroCriticoIncoming_(
+    { como_fazer_bem: m.como_fazer_bem, erro_critico: m.erro_critico, objetivo: m.objetivo },
+    c
+  );
   var qCE = iaMotorValidarComoFazerErroCriticoLeve_(pre.como_fazer_bem, pre.erro_critico);
   if (qCE) falhas.push({ codigo: 'como_erro', mensagem: qCE });
 
