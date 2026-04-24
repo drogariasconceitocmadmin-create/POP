@@ -580,6 +580,87 @@
       margin:0 auto;
     }
 
+    /* Modo execução — leitura rápida no balcão */
+    .pop-exec-wrap{
+      max-width:720px;
+      margin:0 auto;
+      padding:8px 0 24px;
+    }
+    .pop-exec-head{
+      margin-bottom:22px;
+      padding-bottom:14px;
+      border-bottom:2px solid var(--line);
+    }
+    .pop-exec-head h1{
+      margin:0 0 8px;
+      font-size:clamp(1.35rem, 4vw, 1.75rem);
+      line-height:1.2;
+      color:var(--text);
+    }
+    .pop-exec-meta{
+      font-size:15px;
+      color:#4b5563;
+      line-height:1.45;
+      margin:0 0 10px;
+    }
+    .pop-exec-sec{
+      margin-bottom:28px;
+    }
+    .pop-exec-sec h2{
+      margin:0 0 14px;
+      font-size:13px;
+      font-weight:800;
+      text-transform:uppercase;
+      letter-spacing:.06em;
+      color:#6b7280;
+    }
+    .pop-exec-steps ol{
+      margin:0;
+      padding-left:1.35rem;
+      list-style-position:outside;
+    }
+    .pop-exec-steps li{
+      font-size:clamp(1.12rem, 3.2vw, 1.35rem);
+      line-height:1.62;
+      margin-bottom:20px;
+      color:#111827;
+    }
+    .pop-exec-expand-wrap{
+      margin:28px 0 8px;
+      padding-top:8px;
+    }
+    .pop-exec-expand-wrap button{
+      font-size:15px;
+      font-weight:700;
+      padding:12px 18px;
+    }
+    .pop-full-inline{
+      margin-top:20px;
+      padding-top:24px;
+      border-top:2px solid var(--line);
+    }
+    .pop-full-inline.hidden{
+      display:none;
+    }
+    .pop-exec-line{
+      font-size:clamp(1.02rem, 2.5vw, 1.12rem);
+      line-height:1.5;
+      color:#1f2937;
+      padding:12px 16px;
+      background:#f9fafb;
+      border-radius:12px;
+      border:1px solid var(--line);
+    }
+    .pop-exec-check ul{
+      margin:0;
+      padding-left:1.25rem;
+    }
+    .pop-exec-check li{
+      font-size:clamp(1rem, 2.4vw, 1.1rem);
+      line-height:1.5;
+      margin-bottom:12px;
+    }
+
     .doc-header{
       background:
         radial-gradient(circle at right top, rgba(255,255,255,.14), transparent 28%),
@@ -2599,7 +2680,16 @@
             (errOrRes.error && errOrRes.error.message) ||
             errOrRes.details ||
             (Array.isArray(errOrRes.errors) && errOrRes.errors.length && errOrRes.errors[0].message);
-          if (m && String(m).trim()) return String(m).trim();
+          if (m && String(m).trim()) {
+            let out = String(m).trim();
+            const arr =
+              errOrRes.erros ||
+              (errOrRes.error && errOrRes.error.details && errOrRes.error.details.erros);
+            if (Array.isArray(arr) && arr.length) {
+              out += '\n' + arr.map(function (x) { return '• ' + String(x); }).join('\n');
+            }
+            return out;
+          }
         }
       } catch (e) {}
       return fb;
@@ -3907,13 +3997,20 @@
 
     function publicarPopFrontend(popId) {
       if (!requireAuth()) return;
-      callBackend('publicarPop', [currentToken, popId], (res) => {
-        markPopIaFunnelCompleted_();
-        showToast(res.message || 'Publicado.', 'success');
-        carregarPortal(function () {
-          syncPopViewerIfOpen_(popId);
-        });
-      });
+      callBackend(
+        'publicarPop',
+        [currentToken, popId],
+        (res) => {
+          markPopIaFunnelCompleted_();
+          showToast(res.message || 'Publicado.', 'success');
+          carregarPortal(function () {
+            syncPopViewerIfOpen_(popId);
+          });
+        },
+        (res) => {
+          showToast(formatBackendError_('publicarPop', res, 'Publicação bloqueada.'), 'error');
+        }
+      );
     }
 
     function salvarUsuario() {
@@ -5245,7 +5342,167 @@
       return parts.join('');
     }
 
+    function viewerTextoVazioOuNaoInformado_(v) {
+      const s = String(viewerCampoLegivel_(v) || '').trim();
+      if (!s) return true;
+      const low = s
+        .toLowerCase()
+        .normalize('NFD')
+        .replace(/[\u0300-\u036f]/g, '');
+      if (low === 'nao informado' || low === 'nao informado.') return true;
+      return false;
+    }
+
+    function popExecLinhasProcedimento_(pop, c) {
+      const lines = [];
+      const crit = String(pop.tipo || '').toLowerCase() === 'critico' && isCriticoProcedimentoItemsUi_(c.procedimento);
+      if (crit) {
+        const arr = Array.isArray(c.procedimento) ? c.procedimento : [];
+        arr.forEach(function (it) {
+          const t = String((it && (it.descricao || it.etapa || it.item || it.acao)) || '').trim();
+          if (t && !viewerTextoVazioOuNaoInformado_(t)) lines.push(t);
+        });
+      } else {
+        const proc = Array.isArray(c.procedimento) ? c.procedimento : [];
+        proc.forEach(function (x) {
+          const t = String(x == null ? '' : x).trim();
+          if (t && !viewerTextoVazioOuNaoInformado_(t)) lines.push(t);
+        });
+      }
+      return lines;
+    }
+
+    /** Balcão: ≤5 etapas = todas; >5 = 1ª, 2ª, meio, penúltima, última (sem duplicar índices). */
+    function popExecPickEtapasParaBalcao_(lines) {
+      const n = lines.length;
+      if (n <= 5) return lines.slice();
+      const mid = Math.floor((n - 1) / 2);
+      const idxs = [0, 1, mid, n - 2, n - 1];
+      const seen = {};
+      const out = [];
+      idxs.forEach(function (i) {
+        if (i < 0 || i >= n || seen[i]) return;
+        seen[i] = true;
+        out.push(lines[i]);
+      });
+      return out;
+    }
+
+    function popExecLinhasChecklist_(pop) {
+      const checklist = Array.isArray(pop.checklistObj) ? pop.checklistObj : [];
+      const out = [];
+      for (let i = 0; i < checklist.length && out.length < 5; i++) {
+        const t = listItemToText_(checklist[i]).trim();
+        if (t && !viewerTextoVazioOuNaoInformado_(t)) out.push(t);
+      }
+      return out;
+    }
+
+    function renderPopHtmlExec_(pop) {
+      const c = pop.conteudoObj || {};
+      const etapas = popExecPickEtapasParaBalcao_(popExecLinhasProcedimento_(pop, c));
+      const comoRaw = c.como_fazer_bem || c.comoFazerBem;
+      const erroRaw = c.erro_critico || c.erroCritico;
+      const comoLeg = String(viewerCampoLegivel_(comoRaw) || '').trim();
+      const como = (comoLeg.split(/\r?\n/)[0] || '').trim();
+      const erroLeg = String(viewerCampoLegivel_(erroRaw) || '').trim();
+      const erro = (erroLeg.split(/\r?\n/)[0] || '').trim();
+      const checks = popExecLinhasChecklist_(pop);
+
+      const hideComo = viewerTextoVazioOuNaoInformado_(comoRaw) || !como;
+      const hideErro = viewerTextoVazioOuNaoInformado_(erroRaw) || !erro;
+      const hideChk = checks.length === 0;
+      const hideSteps = etapas.length === 0;
+
+      let body = '<div class="pop-exec-wrap">';
+      body += '<div class="pop-exec-head">';
+      body += '<h1>' + escapeHtml(viewerCampoLegivel_(pop.titulo)) + '</h1>';
+      const cod = String(viewerCampoLegivel_(pop.codigo) || '').trim();
+      const metaBits = [];
+      if (cod) metaBits.push('POP ' + cod);
+      const ar = String(viewerCampoLegivel_(pop.area) || '').trim();
+      const pr = String(viewerCampoLegivel_(pop.processo) || '').trim();
+      if (ar) metaBits.push(ar);
+      if (pr) metaBits.push(pr);
+      body += '<p class="pop-exec-meta">' + escapeHtml(metaBits.join(' · ')) + '</p>';
+      body += '<div class="muted" style="font-size:13px;">' + renderPopJourneyCompactHtml_(pop) + '</div>';
+      body += '</div>';
+
+      if (!hideSteps) {
+        body += '<section class="pop-exec-sec pop-exec-steps" aria-label="Etapas principais">';
+        body += '<h2>Etapas principais</h2><ol>';
+        etapas.forEach(function (linha) {
+          body += '<li>' + escapeHtml(linha) + '</li>';
+        });
+        body += '</ol></section>';
+      }
+      if (!hideComo) {
+        body += '<section class="pop-exec-sec" aria-label="Como fazer bem">';
+        body += '<h2>Como fazer bem</h2>';
+        body += '<div class="pop-exec-line">' + escapeHtml(como) + '</div></section>';
+      }
+      if (!hideErro) {
+        body += '<section class="pop-exec-sec" aria-label="Erro crítico">';
+        body += '<h2>Erro crítico</h2>';
+        body += '<div class="pop-exec-line">' + escapeHtml(erro) + '</div></section>';
+      }
+      if (!hideChk) {
+        body += '<section class="pop-exec-sec pop-exec-check" aria-label="Checklist operacional">';
+        body += '<h2>Checklist operacional</h2><ul>';
+        checks.forEach(function (linha) {
+          body += '<li>' + escapeHtml(linha) + '</li>';
+        });
+        body += '</ul></section>';
+      }
+
+      body +=
+        '<div class="pop-exec-expand-wrap">' +
+        '<button type="button" class="ghost" id="popViewExpandDetailBtn" onclick="expandPopViewerDetailsInline_()">Ver detalhes</button>' +
+        '</div>' +
+        '<div id="popViewFullInline" class="pop-full-inline hidden" aria-hidden="true"></div>';
+
+      if (hideSteps && hideComo && hideErro && hideChk) {
+        body +=
+          '<p class="muted" style="margin:16px 0;">Sem conteúdo operacional resumido neste POP. Toque em <strong>Ver detalhes</strong> abaixo para o documento completo.</p>';
+      }
+
+      body +=
+        '<p class="muted" style="margin-top:20px;font-size:13px;">Leitura: ' +
+        (pop.lido ? escapeHtml('Lido em ' + formatDateTime(pop.dataLeitura)) : '<strong>Pendente</strong>') +
+        ' · Use <strong>Confirmar leitura</strong> no topo quando aplicável.</p>';
+      body += '</div>';
+      return body;
+    }
+
+    function expandPopViewerDetailsInline_() {
+      const wrap = document.getElementById('popViewFullInline');
+      const btn = document.getElementById('popViewExpandDetailBtn');
+      if (!wrap || !currentPop) return;
+      const open = !wrap.classList.contains('hidden');
+      if (open) {
+        wrap.classList.add('hidden');
+        wrap.setAttribute('aria-hidden', 'true');
+        wrap.innerHTML = '';
+        if (btn) btn.textContent = 'Ver detalhes';
+        return;
+      }
+      try {
+        wrap.innerHTML = renderPopHtmlFull_(currentPop);
+      } catch (e) {
+        console.error(e);
+        wrap.innerHTML = '<p class="muted">Não foi possível carregar os detalhes.</p>';
+      }
+      wrap.classList.remove('hidden');
+      wrap.setAttribute('aria-hidden', 'false');
+      if (btn) btn.textContent = 'Ocultar detalhes';
+    }
+
     function renderPopHtml(pop) {
+      if (!pop) return '';
+      return renderPopHtmlExec_(pop);
+    }
+
+    function renderPopHtmlFull_(pop) {
       const c = pop.conteudoObj || {};
       const checklist = Array.isArray(pop.checklistObj) ? pop.checklistObj : [];
       const logoBlock = appConfig.logoUrl

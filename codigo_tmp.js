@@ -3550,7 +3550,6 @@ function popNormTextoPlaceholder_(s) {
   t = popRemoverDiacriticosLatinos_(t);
   t = t.replace(/\./g, '');
   t = t.replace(/\s+/g, ' ').trim();
-  t = popNormTextoPlaceholderCorrecaoMojibakeNao_(t);
   return t;
 }
 
@@ -3572,17 +3571,6 @@ function popRemoverDiacriticosLatinos_(str) {
     .replace(/[ñǹńň]/g, 'n')
     .replace(/[çćĉċč]/g, 'c')
     .replace(/[ýÿŷ]/g, 'y');
-}
-
-/**
- * "Não" corrompido como "N?o" quando UTF-8 é lido como Latin-1 (ou canal perde o byte do ã).
- * Só substitui as sequências literais abaixo — nunca "?" genérico.
- */
-function popNormTextoPlaceholderCorrecaoMojibakeNao_(t) {
-  var s = String(t || '');
-  s = s.split('n?o informado').join('nao informado');
-  s = s.split('n?o se aplica').join('nao se aplica');
-  return s;
 }
 
 /** Texto explícito "Não informado" / equivalentes (proibido em publicação). */
@@ -3613,10 +3601,6 @@ function popSelfTestPlaceholderNormalizacao_() {
     'Não   informado',
     'não-informado',
     'Não\u00A0informado',
-    'N?o informado',
-    'N?O INFORMADO',
-    'N?o   informado',
-    'N?o-informado',
   ];
   var want = 'nao informado';
   var detalhes = [];
@@ -3626,19 +3610,6 @@ function popSelfTestPlaceholderNormalizacao_() {
     var pass = k === want;
     if (!pass) ok = false;
     detalhes.push({ entrada: samples[i], normalizado: k, esperado: want, pass: pass });
-  }
-  var samplesSeAplica = ['N?o se aplica', 'n?o se aplica', 'N?o   se aplica'];
-  var wantSa = 'nao se aplica';
-  for (var j = 0; j < samplesSeAplica.length; j++) {
-    var ks = popNormTextoPlaceholder_(samplesSeAplica[j]);
-    var passS = ks === wantSa && popEsNaoInformadoLiteral_(samplesSeAplica[j]);
-    if (!passS) ok = false;
-    detalhes.push({
-      entrada: samplesSeAplica[j],
-      normalizado: ks,
-      esperado: wantSa,
-      pass: passS,
-    });
   }
   return { ok: ok, detalhes: detalhes };
 }
@@ -4167,8 +4138,7 @@ function popFixtureColaborativoPublicacaoMinimoTeste_() {
       procedimento: proc,
       checklist: chk,
       pontosDeAtencao: ['Postura: costas alinhadas e olhar para o cliente'],
-      como_fazer_bem:
-        'Olhar para o cliente e falar em voz calma no balcão, explicando em duas frases o que acontece a seguir na farmácia',
+      como_fazer_bem: 'Olhar para o cliente e falar em voz calma no balcão com atenção',
       erro_critico: 'Ignorar o cliente ou desviar o olhar quando ele pede ajuda na gôndola',
     },
   };
@@ -4229,34 +4199,6 @@ function popSelfTestPublicacaoComoErroCaminhoReal_() {
   run(
     'erro_camel_placeholder',
     { erro_critico: '', erroCritico: 'Não informado' },
-    ['erro_critico contém placeholder inválido'],
-    ['erro_critico abstrato']
-  );
-
-  run(
-    'snake_placeholder_mojibake',
-    { como_fazer_bem: 'N?o informado' },
-    ['como_fazer_bem contém placeholder inválido'],
-    ['como_fazer_bem abstrato']
-  );
-
-  run(
-    'camel_placeholder_mojibake',
-    { como_fazer_bem: '', comoFazerBem: 'N?O INFORMADO' },
-    ['como_fazer_bem contém placeholder inválido'],
-    ['como_fazer_bem abstrato']
-  );
-
-  run(
-    'erro_snake_placeholder_mojibake',
-    { erro_critico: 'N?o-informado' },
-    ['erro_critico contém placeholder inválido'],
-    ['erro_critico abstrato']
-  );
-
-  run(
-    'erro_camel_placeholder_mojibake',
-    { erro_critico: '', erroCritico: 'N?o   informado' },
     ['erro_critico contém placeholder inválido'],
     ['erro_critico abstrato']
   );

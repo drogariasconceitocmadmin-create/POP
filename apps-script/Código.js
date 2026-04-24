@@ -3550,6 +3550,7 @@ function popNormTextoPlaceholder_(s) {
   t = popRemoverDiacriticosLatinos_(t);
   t = t.replace(/\./g, '');
   t = t.replace(/\s+/g, ' ').trim();
+  t = popNormTextoPlaceholderCorrecaoMojibakeNao_(t);
   return t;
 }
 
@@ -3571,6 +3572,17 @@ function popRemoverDiacriticosLatinos_(str) {
     .replace(/[ñǹńň]/g, 'n')
     .replace(/[çćĉċč]/g, 'c')
     .replace(/[ýÿŷ]/g, 'y');
+}
+
+/**
+ * "Não" corrompido como "N?o" quando UTF-8 é lido como Latin-1 (ou canal perde o byte do ã).
+ * Só substitui as sequências literais abaixo — nunca "?" genérico.
+ */
+function popNormTextoPlaceholderCorrecaoMojibakeNao_(t) {
+  var s = String(t || '');
+  s = s.split('n?o informado').join('nao informado');
+  s = s.split('n?o se aplica').join('nao se aplica');
+  return s;
 }
 
 /** Texto explícito "Não informado" / equivalentes (proibido em publicação). */
@@ -3601,6 +3613,10 @@ function popSelfTestPlaceholderNormalizacao_() {
     'Não   informado',
     'não-informado',
     'Não\u00A0informado',
+    'N?o informado',
+    'N?O INFORMADO',
+    'N?o   informado',
+    'N?o-informado',
   ];
   var want = 'nao informado';
   var detalhes = [];
@@ -3611,7 +3627,133 @@ function popSelfTestPlaceholderNormalizacao_() {
     if (!pass) ok = false;
     detalhes.push({ entrada: samples[i], normalizado: k, esperado: want, pass: pass });
   }
+  var samplesSeAplica = ['N?o se aplica', 'n?o se aplica', 'N?o   se aplica'];
+  var wantSa = 'nao se aplica';
+  for (var j = 0; j < samplesSeAplica.length; j++) {
+    var ks = popNormTextoPlaceholder_(samplesSeAplica[j]);
+    var passS = ks === wantSa && popEsNaoInformadoLiteral_(samplesSeAplica[j]);
+    if (!passS) ok = false;
+    detalhes.push({
+      entrada: samplesSeAplica[j],
+      normalizado: ks,
+      esperado: wantSa,
+      pass: passS,
+    });
+  }
   return { ok: ok, detalhes: detalhes };
+}
+
+/** Texto coerente para validação de publicação (objeto/lista → string legível para popEsNaoInformadoLiteral_). */
+function popTextoCampoPublicacao_(v) {
+  if (v == null) return '';
+  if (typeof v === 'object' && !Array.isArray(v)) return normalizeText_(stringifyMixedContentItem_(v));
+  if (Array.isArray(v)) return normalizeText_(normalizeStringArray_(v).join(' '));
+  return normalizeText_(String(v));
+}
+
+/** Se `primary` não tem texto útil após coerção, usa `fallback` (ex.: como_fazer_bem vazio + comoFazerBem preenchido). */
+function popJsonCampoTextoOuAlternativo_(primary, fallback) {
+  if (primary !== undefined && primary !== null && popTextoCampoPublicacao_(primary) !== '') return primary;
+  return fallback;
+}
+
+/**
+ * Chave de conteúdo JSON normalizada para casar variantes (BOM, camel/snake, espaços, hífens).
+ * Usado só em publicação/diagnóstico — não altera dados persistidos.
+ */
+function popNormalizarChaveConteudoJson_(k) {
+  var s = String(k == null ? '' : k).replace(/^\uFEFF+/g, '');
+  s = popRemoverDiacriticosLatinos_(s.toLowerCase());
+  return s.replace(/[\s_\-]/g, '');
+}
+
+function popListarParesChaveValorPorSlug_(cj, slugNorm) {
+  var out = [];
+  var keys = Object.keys(cj || {});
+  for (var i = 0; i < keys.length; i++) {
+    var rawKey = keys[i];
+    if (popNormalizarChaveConteudoJson_(rawKey) === slugNorm) {
+      out.push({ k: rawKey, v: cj[rawKey] });
+    }
+  }
+  return out;
+}
+
+function popOrdenarParesPreferindoChavesCanonicas_(pares, snakePrefer, camelPrefer) {
+  return pares.slice().sort(function (a, b) {
+    function rank(k) {
+      if (k === snakePrefer) return 0;
+      if (k === camelPrefer) return 1;
+      return 2;
+    }
+    var ra = rank(a.k);
+    var rb = rank(b.k);
+    if (ra !== rb) return ra - rb;
+    return String(a.k).localeCompare(String(b.k), 'pt');
+  });
+}
+
+function popPrimeiroTextoUtilConteudo_(pares) {
+  for (var i = 0; i < pares.length; i++) {
+    var t = popTextoCampoPublicacao_(pares[i].v);
+    if (t) return t;
+  }
+  return '';
+}
+
+function popAlgumCandidatoPlaceholderConteudo_(pares) {
+  for (var i = 0; i < pares.length; i++) {
+    var t = popTextoCampoPublicacao_(pares[i].v);
+    if (!t) continue;
+    if (popEsNaoInformadoLiteral_(t)) return true;
+  }
+  return false;
+}
+
+/**
+ * Fonte: `pop.conteudoObj` (= JSON.parse(conteudoJson) em normalizePopRow_).
+ * Agrega snake/camel e qualquer chave cujo slug case-insensitive coincide (ex.: chave com BOM).
+ */
+function popExtrairComoErroCriticoParaPublicacao_(cj) {
+  cj = cj && typeof cj === 'object' ? cj : {};
+  var paresComo = popOrdenarParesPreferindoChavesCanonicas_(
+    popListarParesChaveValorPorSlug_(cj, 'comofazerbem'),
+    'como_fazer_bem',
+    'comoFazerBem'
+  );
+  var paresErro = popOrdenarParesPreferindoChavesCanonicas_(
+    popListarParesChaveValorPorSlug_(cj, 'errocritico'),
+    'erro_critico',
+    'erroCritico'
+  );
+  return {
+    comoTexto: popPrimeiroTextoUtilConteudo_(paresComo),
+    erroTexto: popPrimeiroTextoUtilConteudo_(paresErro),
+    temPlaceholderComo: popAlgumCandidatoPlaceholderConteudo_(paresComo),
+    temPlaceholderErro: popAlgumCandidatoPlaceholderConteudo_(paresErro),
+  };
+}
+
+/** Só publicação: não chama heurística leve se qualquer texto já for placeholder (evita “abstrato” falso). */
+function iaMotorValidarComoFazerErroCriticoLevePublicacao_(comoTxt, erroTxt) {
+  if (popEsNaoInformadoLiteral_(comoTxt) || popEsNaoInformadoLiteral_(erroTxt)) return '';
+  return iaMotorValidarComoFazerErroCriticoLeve_(comoTxt, erroTxt);
+}
+
+function popCampoEssencialPlaceholderSomente_(erros, nomeCampo, valor) {
+  var t = popTextoCampoPublicacao_(valor);
+  if (!t) return;
+  if (popEsNaoInformadoLiteral_(t)) erros.push('campo essencial com placeholder inválido: ' + nomeCampo);
+}
+
+function popCampoEssencialPlaceholderLista_(erros, nomeCampo, arr) {
+  var list = normalizeStringArray_(arr || []);
+  for (var i = 0; i < list.length; i++) {
+    if (popEsNaoInformadoLiteral_(list[i])) {
+      erros.push('campo essencial com placeholder inválido: ' + nomeCampo);
+      return;
+    }
+  }
 }
 
 function popThrowValidacaoPublicacao_(erros) {
@@ -3828,7 +3970,6 @@ function popValidarChecklistPublicacao_(checklistArr) {
 function popObjetivoContaminadoOuFraco_(titulo, objetivo) {
   var o = normalizeText_(objetivo);
   if (!o) return 'objetivo ausente';
-  if (popEsNaoInformadoLiteral_(o)) return 'objetivo não pode ser "Não informado"';
   if (o.length < POP_PUBLISH_MIN_OBJETIVO_LEN_) return 'objetivo insuficiente (menos de ' + POP_PUBLISH_MIN_OBJETIVO_LEN_ + ' caracteres)';
   var t = iaBagNorm_(titulo);
   var ob = iaBagNorm_(o);
@@ -3862,9 +4003,15 @@ function popValidacaoConteudoBloqueantePublicacao_(pop) {
     erros.push(String(e0.message || e0));
   }
 
-  if (popEsNaoInformadoLiteral_(pop.titulo) || !normalizeText_(pop.titulo)) erros.push('titulo inválido ou "Não informado"');
-  if (popEsNaoInformadoLiteral_(pop.area) || !normalizeText_(pop.area)) erros.push('area inválida ou "Não informado"');
-  if (popEsNaoInformadoLiteral_(pop.processo) || !normalizeText_(pop.processo)) erros.push('processo inválido ou "Não informado"');
+  var titPub = popTextoCampoPublicacao_(pop.titulo);
+  if (popEsNaoInformadoLiteral_(titPub)) erros.push('campo essencial com placeholder inválido: titulo');
+  else if (!titPub) erros.push('titulo ausente ou inválido');
+  var areaPub = popTextoCampoPublicacao_(pop.area);
+  if (popEsNaoInformadoLiteral_(areaPub)) erros.push('campo essencial com placeholder inválido: area');
+  else if (!areaPub) erros.push('area ausente ou inválida');
+  var procPub = popTextoCampoPublicacao_(pop.processo);
+  if (popEsNaoInformadoLiteral_(procPub)) erros.push('campo essencial com placeholder inválido: processo');
+  else if (!procPub) erros.push('processo ausente ou inválido');
 
   var catOk = popCatalogoParAreaProcessoOk_(pop.area, pop.processo);
   if (!catOk.ok) erros.push('area/processo fora do cadastro (enum)');
@@ -3873,16 +4020,61 @@ function popValidacaoConteudoBloqueantePublicacao_(pop) {
   var perfOk = ['todos', 'farmaceutico', 'gerente', 'diretor', 'atendente', 'entregador'].indexOf(perf) >= 0;
   if (!perfOk) erros.push('publicoAlvo enum inválido');
 
-  var objMsg = popObjetivoContaminadoOuFraco_(pop.titulo, cj.objetivo || pop.objetivo || '');
-  if (objMsg) {
-    if (objMsg.indexOf('contaminado') >= 0) erros.push('objetivo contaminado');
-    else if (objMsg.indexOf('insuficiente') >= 0) erros.push('objetivo insuficiente');
-    else if (objMsg.indexOf('Não informado') >= 0) erros.push('objetivo não pode ser "Não informado"');
-    else erros.push(objMsg);
+  var objStr = popTextoCampoPublicacao_(cj.objetivo || pop.objetivo);
+  if (popEsNaoInformadoLiteral_(objStr)) erros.push('campo essencial com placeholder inválido: objetivo');
+  else {
+    var objMsg = popObjetivoContaminadoOuFraco_(pop.titulo, objStr);
+    if (objMsg) {
+      if (objMsg.indexOf('contaminado') >= 0) erros.push('objetivo contaminado');
+      else if (objMsg.indexOf('insuficiente') >= 0) erros.push('objetivo insuficiente');
+      else erros.push(objMsg);
+    }
   }
 
   if (tipo === 'colaborativo') {
+    popCampoEssencialPlaceholderSomente_(erros, 'escopo', cj.escopo);
+    popCampoEssencialPlaceholderLista_(erros, 'responsaveis', cj.responsaveis);
+    popCampoEssencialPlaceholderSomente_(erros, 'regra_de_ouro', cj.regra_de_ouro);
+    popCampoEssencialPlaceholderSomente_(erros, 'frequencia', cj.frequencia);
+    popCampoEssencialPlaceholderLista_(erros, 'pontos_criticos', cj.pontos_criticos);
+    popCampoEssencialPlaceholderLista_(erros, 'checklist_lider', cj.checklist_lider);
+    popCampoEssencialPlaceholderLista_(erros, 'desvios', cj.desvios);
+    popCampoEssencialPlaceholderSomente_(erros, 'treinamento', cj.treinamento);
+
+    var cePub = popExtrairComoErroCriticoParaPublicacao_(cj);
+    var comoRaw = cePub.comoTexto;
+    var erroCRaw = cePub.erroTexto;
+    if (cePub.temPlaceholderComo) erros.push('como_fazer_bem contém placeholder inválido');
+    else if (!comoRaw) erros.push('como_fazer_bem ausente');
+    if (cePub.temPlaceholderErro) erros.push('erro_critico contém placeholder inválido');
+    else if (!erroCRaw) erros.push('erro_critico ausente');
+    if (comoRaw && erroCRaw && !cePub.temPlaceholderComo && !cePub.temPlaceholderErro) {
+      var qCE = iaMotorValidarComoFazerErroCriticoLevePublicacao_(comoRaw, erroCRaw);
+      if (qCE) {
+        if (qCE.indexOf('Como fazer bem') >= 0) erros.push('como_fazer_bem abstrato');
+        if (qCE.indexOf('Erro crítico') >= 0) erros.push('erro_critico abstrato');
+      }
+    }
+
+    var metRaw = popTextoCampoPublicacao_(cj.metrica || '');
+    if (popEsNaoInformadoLiteral_(metRaw)) erros.push('campo essencial com placeholder inválido: metrica');
+    else if (metRaw.length < POP_PUBLISH_MIN_METRICA_LEN_) {
+      erros.push('metrica ausente ou insuficiente (mínimo ' + POP_PUBLISH_MIN_METRICA_LEN_ + ' caracteres)');
+    }
+
     var proc = cj.procedimento;
+    if (Array.isArray(proc)) {
+      for (var ph = 0; ph < proc.length; ph++) {
+        var stepPh = proc[ph];
+        var txtPh = typeof stepPh === 'string' ? stepPh : stringifyMixedContentItem_(stepPh);
+        var txPh = popTextoCampoPublicacao_(txtPh);
+        if (txPh && popEsNaoInformadoLiteral_(txPh)) {
+          erros.push('campo essencial com placeholder inválido: procedimento');
+          break;
+        }
+      }
+    }
+
     var nEt = countProcedimentoEtapasValidas_(proc);
     if (nEt < POP_PUBLISH_MIN_PROC_COLAB_) {
       erros.push('procedimento insuficiente (mínimo ' + POP_PUBLISH_MIN_PROC_COLAB_ + ' etapas com conteúdo)');
@@ -3899,39 +4091,12 @@ function popValidacaoConteudoBloqueantePublicacao_(pop) {
       }
     }
 
-    var como = String(cj.como_fazer_bem || cj.comoFazerBem || '').trim();
-    var erroC = String(cj.erro_critico || cj.erroCritico || '').trim();
-    if (!como) erros.push('como_fazer_bem ausente');
-    else if (popEsNaoInformadoLiteral_(como)) erros.push('como_fazer_bem não pode ser "Não informado"');
-    if (!erroC) erros.push('erro_critico ausente');
-    else if (popEsNaoInformadoLiteral_(erroC)) erros.push('erro_critico não pode ser "Não informado"');
-    if (como && erroC && !popEsNaoInformadoLiteral_(como) && !popEsNaoInformadoLiteral_(erroC)) {
-      var qCE = iaMotorValidarComoFazerErroCriticoLeve_(como, erroC);
-      if (qCE) {
-        if (qCE.indexOf('Como fazer bem') >= 0) erros.push('como_fazer_bem abstrato');
-        if (qCE.indexOf('Erro crítico') >= 0) erros.push('erro_critico abstrato');
-      }
-    }
-
-    var met = normalizeText_(cj.metrica || '');
-    if (popEsNaoInformadoLiteral_(met) || met.length < POP_PUBLISH_MIN_METRICA_LEN_) {
-      erros.push('metrica ausente ou insuficiente (mínimo ' + POP_PUBLISH_MIN_METRICA_LEN_ + ' caracteres)');
-    }
-
     var pe = popBehavioralPontosExec_(cj.pontosDeAtencao || [], cj.pontos_criticos || []);
     if (!pe.length) erros.push('humanizacao concreta ausente (use Fala/script, Tom, Postura ou Critério de sucesso em pontos de atenção)');
 
     var chkErr = popValidarChecklistPublicacao_(cj.checklist);
     for (var ce = 0; ce < chkErr.length; ce++) {
       if (erros.indexOf(chkErr[ce]) < 0) erros.push(chkErr[ce]);
-    }
-
-    if (Array.isArray(proc)) {
-      for (var pi = 0; pi < proc.length; pi++) {
-        var step = proc[pi];
-        var txt = typeof step === 'string' ? step : stringifyMixedContentItem_(step);
-        if (txt && popEsNaoInformadoLiteral_(txt)) erros.push('procedimento com etapa "Não informado"');
-      }
     }
   } else if (tipo === 'critico') {
     var normCrit = {
@@ -3957,6 +4122,171 @@ function popValidacaoConteudoBloqueantePublicacao_(pop) {
     if (uniq.indexOf(erros[r]) < 0) uniq.push(erros[r]);
   }
   return uniq;
+}
+
+/**
+ * POP colaborativo mínimo para exercitar popValidacaoConteudoBloqueantePublicacao_ (mesmo caminho que assertPopValidacaoTecnicaPublicacao_).
+ * Executar no editor: popSelfTestPublicacaoComoErroCaminhoReal_()
+ */
+function popFixtureColaborativoPublicacaoMinimoTeste_() {
+  var chk = [
+    'Confirmar identidade do cliente com dois dados no balcão',
+    'Verificar receituário antes de dispensar medicamentos',
+    'Registrar orientação ao cliente na ficha do sistema',
+    'Conferir endereço e contacto da receita',
+    'Explicar posologia de forma clara em voz calma',
+  ];
+  var proc = [
+    'Olhar para o cliente e acenar ao aproximar-se da farmácia',
+    'Perguntar nome completo e motivo da visita no balcão',
+    'Confirmar dados do pedido e entregar o medicamento no balcão',
+  ];
+  return {
+    titulo: 'Atendimento padrão na farmácia vinte e cinco',
+    area: 'Atendimento e vendas',
+    processo: 'Atendimento',
+    tipo: 'colaborativo',
+    publicoAlvo: 'todos',
+    status: 'rascunho',
+    exclusivoFarmaceutico: false,
+    leituraObrigatoria: false,
+    treinamentoObrigatorio: false,
+    criticidade: 'media',
+    conteudoObj: {
+      objetivo: 'Garantir que cada cliente seja atendido com segurança e cordialidade no balcão da farmácia',
+      escopo: 'Aplica-se ao balcão em horário de funcionamento',
+      responsaveis: ['Farmacêutico', 'Atendente'],
+      regra_de_ouro: 'Cliente sempre em primeiro lugar com postura acolhedora',
+      frequencia: 'sempre que houver cliente',
+      pontos_criticos: ['Tom: voz clara e ritmo calmo com o cliente'],
+      checklist_lider: ['verificar fila', 'apoio ao caixa'],
+      desvios: ['postura fechada'],
+      treinamento: 'Integração ao onboarding da equipe',
+      metrica: 'Percentagem de atendimentos com checklist cumprida no dia',
+      procedimento: proc,
+      checklist: chk,
+      pontosDeAtencao: ['Postura: costas alinhadas e olhar para o cliente'],
+      como_fazer_bem:
+        'Olhar para o cliente e falar em voz calma no balcão, explicando em duas frases o que acontece a seguir na farmácia',
+      erro_critico: 'Ignorar o cliente ou desviar o olhar quando ele pede ajuda na gôndola',
+    },
+  };
+}
+
+/**
+ * Testa como/erro no mesmo fluxo de lista de erros da publicação (popValidacaoConteudoBloqueantePublicacao_).
+ * @returns {{ ok: boolean, casos: Array<{ tag: string, ok: boolean, erros: string[] }> }}
+ */
+function popSelfTestPublicacaoComoErroCaminhoReal_() {
+  var base = popFixtureColaborativoPublicacaoMinimoTeste_();
+  var casos = [];
+
+  function run(tag, patchCj, deveConter, naoDeveConter, opts) {
+    var pop = JSON.parse(JSON.stringify(base));
+    if (opts && opts.conteudoObjCompleto) {
+      pop.conteudoObj = opts.conteudoObjCompleto;
+    } else {
+      pop.conteudoObj = merge_(pop.conteudoObj, patchCj || {});
+    }
+    // Mesmo caminho que assertPopValidacaoTecnicaPublicacao_: normalizáveis antes da lista bloqueante.
+    popAplicarNormalizaveisPublicacao_(pop);
+    var erros = popValidacaoConteudoBloqueantePublicacao_(pop);
+    var blob = erros.join(' | ');
+    var ok = true;
+    var dc = deveConter || [];
+    var nd = naoDeveConter || [];
+    for (var i = 0; i < dc.length; i++) {
+      if (blob.indexOf(dc[i]) < 0) ok = false;
+    }
+    for (var j = 0; j < nd.length; j++) {
+      if (blob.indexOf(nd[j]) >= 0) ok = false;
+    }
+    casos.push({ tag: tag, ok: ok, erros: erros });
+  }
+
+  run(
+    'snake_placeholder',
+    { como_fazer_bem: 'Não informado' },
+    ['como_fazer_bem contém placeholder inválido'],
+    ['como_fazer_bem abstrato']
+  );
+
+  run(
+    'camel_placeholder',
+    { como_fazer_bem: '', comoFazerBem: 'Não informado' },
+    ['como_fazer_bem contém placeholder inválido'],
+    ['como_fazer_bem abstrato']
+  );
+
+  run(
+    'erro_snake_placeholder',
+    { erro_critico: 'Não informado' },
+    ['erro_critico contém placeholder inválido'],
+    ['erro_critico abstrato']
+  );
+
+  run(
+    'erro_camel_placeholder',
+    { erro_critico: '', erroCritico: 'Não informado' },
+    ['erro_critico contém placeholder inválido'],
+    ['erro_critico abstrato']
+  );
+
+  run(
+    'snake_placeholder_mojibake',
+    { como_fazer_bem: 'N?o informado' },
+    ['como_fazer_bem contém placeholder inválido'],
+    ['como_fazer_bem abstrato']
+  );
+
+  run(
+    'camel_placeholder_mojibake',
+    { como_fazer_bem: '', comoFazerBem: 'N?O INFORMADO' },
+    ['como_fazer_bem contém placeholder inválido'],
+    ['como_fazer_bem abstrato']
+  );
+
+  run(
+    'erro_snake_placeholder_mojibake',
+    { erro_critico: 'N?o-informado' },
+    ['erro_critico contém placeholder inválido'],
+    ['erro_critico abstrato']
+  );
+
+  run(
+    'erro_camel_placeholder_mojibake',
+    { erro_critico: '', erroCritico: 'N?o   informado' },
+    ['erro_critico contém placeholder inválido'],
+    ['erro_critico abstrato']
+  );
+
+  var bomKey = '\uFEFFcomo_fazer_bem';
+  var cjBom = JSON.parse(JSON.stringify(base.conteudoObj));
+  delete cjBom.como_fazer_bem;
+  cjBom[bomKey] = 'Não informado';
+  run('bom_na_chave_com_bom', null, ['como_fazer_bem contém placeholder inválido'], ['como_fazer_bem abstrato'], { conteudoObjCompleto: cjBom });
+
+  run(
+    'abstrato_como',
+    { como_fazer_bem: 'aa aa aa aa aa' },
+    ['como_fazer_bem abstrato'],
+    ['erro_critico abstrato']
+  );
+
+  run(
+    'abstrato_erro',
+    { erro_critico: 'bb bb bb bb bb' },
+    ['erro_critico abstrato'],
+    ['como_fazer_bem abstrato']
+  );
+
+  run('conteudo_bom_fixture', {}, [], ['como_fazer_bem contém placeholder inválido', 'como_fazer_bem abstrato', 'erro_critico abstrato']);
+
+  var allOk = true;
+  for (var c = 0; c < casos.length; c++) {
+    if (!casos[c].ok) allOk = false;
+  }
+  return { ok: allOk, casos: casos };
 }
 
 function popSnapshotPersistiveisPublicacao_(pop) {
@@ -4505,6 +4835,213 @@ function setPopVigenteBasic_(user, popId, versaoId) {
     status: pub.status,
   });
   return pub;
+}
+
+// =============================================================================
+// DEBUG temporário: diagnóstico publicação como_fazer_bem / erro_critico
+// (não altera publicação; remover quando já não for necessário)
+// =============================================================================
+
+function debugPublicacaoComoErroChavePareceRelacionada_(rawKey) {
+  var norm = popNormalizarChaveConteudoJson_(rawKey);
+  if (!norm) return false;
+  return (
+    norm.indexOf('como') >= 0 ||
+    norm.indexOf('fazer') >= 0 ||
+    norm.indexOf('bem') >= 0 ||
+    norm.indexOf('erro') >= 0 ||
+    norm.indexOf('critico') >= 0
+  );
+}
+
+function debugPublicacaoComoErroValorDiag_(v) {
+  var tPub = popTextoCampoPublicacao_(v);
+  var normPh = popNormTextoPlaceholder_(tPub);
+  var codes = [];
+  if (v != null && (typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean')) {
+    var s = String(v);
+    for (var i = 0; i < Math.min(32, s.length); i++) {
+      codes.push({ i: i, ch: s.charAt(i), code: s.charCodeAt(i) });
+    }
+  }
+  var jsonVal = '';
+  try {
+    jsonVal = JSON.stringify(v);
+  } catch (e1) {
+    jsonVal = String(e1 && e1.message ? e1.message : e1);
+  }
+  return {
+    tipoValor: Object.prototype.toString.call(v),
+    valorJson: jsonVal.length > 800 ? jsonVal.slice(0, 800) + '…' : jsonVal,
+    textoPublicacao: tPub,
+    normPlaceholder: normPh,
+    esNaoInformado: popEsNaoInformadoLiteral_(tPub),
+    primeirosCodepoints: codes,
+  };
+}
+
+/**
+ * Mesmo critério de localização que setPopVigenteBasic_ (listRowsWithRowIndex_ + normalizePopRow_ + find).
+ * Mostra conteudoJson bruto da célula, conteudoObj após normalizePopRow_, e duas validações:
+ * - sem popAplicarNormalizaveisPublicacao_ (caminho incompleto, útil para comparar)
+ * - com popAplicarNormalizaveisPublicacao_ (igual assertPopValidacaoTecnicaPublicacao_ / publicação real)
+ */
+function debugPublicacaoComoErro_(popId) {
+  ensureSchema_();
+  var sheet = getSheet_(SHEET_POPS);
+  var rows = listRowsWithRowIndex_(sheet).map(function (x) {
+    return { rowIndex: x.rowIndex, raw: x.obj, pop: normalizePopRow_(x.obj) };
+  });
+  var match = rows.find(function (p) {
+    return (
+      String(p.pop.popId) === String(popId) ||
+      String(p.pop.versaoId) === String(popId) ||
+      String(p.pop.id) === String(popId)
+    );
+  });
+  if (!match) {
+    return { ok: false, erro: 'POP não encontrado (mesmo critério de setPopVigenteBasic_)', popIdBuscado: String(popId || '') };
+  }
+  var raw = match.raw || {};
+  var cjStrBruto = raw.conteudoJson;
+  var parseBruto = safeJsonParse_(cjStrBruto == null ? '' : String(cjStrBruto));
+
+  var popBase = JSON.parse(JSON.stringify(match.pop));
+  var cjBase = popBase.conteudoObj || {};
+  var ceBase = popExtrairComoErroCriticoParaPublicacao_(cjBase);
+  var errosSemNorm = popValidacaoConteudoBloqueantePublicacao_(JSON.parse(JSON.stringify(popBase)));
+
+  var popPub = JSON.parse(JSON.stringify(match.pop));
+  popAplicarNormalizaveisPublicacao_(popPub);
+  var cjPub = popPub.conteudoObj || {};
+  var cePub = popExtrairComoErroCriticoParaPublicacao_(cjPub);
+  var errosComNorm = popValidacaoConteudoBloqueantePublicacao_(popPub);
+
+  var todasChaves = Object.keys(cjPub || {}).sort();
+  var relacionadas = [];
+  for (var i = 0; i < todasChaves.length; i++) {
+    var kk = todasChaves[i];
+    if (debugPublicacaoComoErroChavePareceRelacionada_(kk)) {
+      relacionadas.push({
+        chave: kk,
+        slugChave: popNormalizarChaveConteudoJson_(kk),
+        diagnostico: debugPublicacaoComoErroValorDiag_(cjPub[kk]),
+      });
+    }
+  }
+
+  return {
+    ok: true,
+    popId: popBase.popId,
+    versaoId: popBase.versaoId,
+    tipo: popBase.tipo,
+    status: popBase.status,
+    rowIndex: match.rowIndex,
+    conteudoJson_tipoCelula: cjStrBruto == null ? 'null' : typeof cjStrBruto,
+    conteudoJson_stringPreview: String(cjStrBruto == null ? '' : cjStrBruto).slice(0, 4000),
+    parseConteudoJsonDireto_ok: parseBruto != null && typeof parseBruto === 'object',
+    conteudoObj_chaves_apos_normalizePopRow: Object.keys(cjBase || {}).sort(),
+    conteudoObj_chaves_apos_normalizaveis: todasChaves,
+    chaves_relacionadas_diag: relacionadas,
+    extracao_sem_popAplicarNormalizaveis: ceBase,
+    erros_validacao_sem_popAplicarNormalizaveis: errosSemNorm,
+    extracao_PATH_REAL_pos_normalizaveis: cePub,
+    erros_validacao_PATH_REAL_pos_normalizaveis: errosComNorm,
+  };
+}
+
+function debugPublicacaoComoErroConteudoBaseColab_() {
+  return JSON.parse(JSON.stringify(popFixtureColaborativoPublicacaoMinimoTeste_().conteudoObj));
+}
+
+function debugPublicacaoComoErroPrimeiroUsuarioPlanilha_() {
+  var users = listRows_(getSheet_(SHEET_USUARIOS));
+  if (!users.length) throw new Error('Folha USUARIOS vazia: impossível criar POP de teste.');
+  var u = users[0];
+  return { id: String(u.id || ''), email: String(u.email || '') };
+}
+
+/**
+ * Insere 4 rascunhos na aba POPs (tags DBG_PUBLICACAO_COMO_ERRO) para inspeção com debugPublicacaoComoErro_(popId).
+ * @returns {{ A: string, B: string, C: string, D: string, titulos: Object }}
+ */
+function debugPublicacaoComoErroSeedQuatroNaPlanilha_() {
+  ensureSchema_();
+  var auth = debugPublicacaoComoErroPrimeiroUsuarioPlanilha_();
+  var sheet = getSheet_(SHEET_POPS);
+  var headers = getHeaders_(sheet);
+  var now = new Date();
+
+  function appendVariant(titulo, cj) {
+    var popId = uuid_();
+    var versaoId = uuid_();
+    var rowObj = {
+      popId: popId,
+      versaoId: versaoId,
+      numero: 'DBG-' + popId.slice(0, 8),
+      versao: '1.0',
+      titulo: titulo,
+      area: 'Atendimento e vendas',
+      processo: 'Atendimento',
+      criticidade: 'media',
+      status: 'rascunho',
+      exclusivoFarmaceutico: false,
+      leituraObrigatoria: false,
+      treinamentoObrigatorio: false,
+      publicoAlvo: 'todos',
+      tags: 'DBG_PUBLICACAO_COMO_ERRO',
+      vigenciaInicio: '',
+      revisaoPrevista: '',
+      autorUserId: auth.id,
+      autorEmail: auth.email,
+      criadoEm: now,
+      atualizadoEm: now,
+      conteudoJson: JSON.stringify(cj),
+      conteudoHtmlGerado: '',
+      drivePdfFileId: '',
+      driveFolderAnexosId: '',
+      tipo: 'colaborativo',
+      origem: 'debug_seed',
+    };
+    appendRowObj_(sheet, headers, rowObj);
+    return popId;
+  }
+
+  var base = debugPublicacaoComoErroConteudoBaseColab_();
+  var cjA = merge_(base, { como_fazer_bem: 'Não informado' });
+  var cjB = merge_(base, {});
+  delete cjB.como_fazer_bem;
+  cjB.comoFazerBem = 'Não informado';
+
+  var cjC = merge_(base, { erro_critico: 'Não informado' });
+  var cjD = merge_(base, {});
+  delete cjD.erro_critico;
+  cjD.erroCritico = 'Não informado';
+
+  var titulos = {
+    A: '[DBG_COMO_SNAKE] Não informado em como_fazer_bem',
+    B: '[DBG_COMO_CAMEL] Não informado só em comoFazerBem',
+    C: '[DBG_ERRO_SNAKE] Não informado em erro_critico',
+    D: '[DBG_ERRO_CAMEL] Não informado só em erroCritico',
+  };
+  var idA = appendVariant(titulos.A, cjA);
+  var idB = appendVariant(titulos.B, cjB);
+  var idC = appendVariant(titulos.C, cjC);
+  var idD = appendVariant(titulos.D, cjD);
+
+  return { A: idA, B: idB, C: idC, D: idD, titulos: titulos };
+}
+
+/** Executa debugPublicacaoComoErro_ nos quatro POPs criados pelo seed (cria novas linhas a cada chamada). */
+function debugPublicacaoComoErroRodarQuatroAposSeed_() {
+  var ids = debugPublicacaoComoErroSeedQuatroNaPlanilha_();
+  return {
+    seed: ids,
+    debugA: debugPublicacaoComoErro_(ids.A),
+    debugB: debugPublicacaoComoErro_(ids.B),
+    debugC: debugPublicacaoComoErro_(ids.C),
+    debugD: debugPublicacaoComoErro_(ids.D),
+  };
 }
 
 function normalizePopRow_(row) {
