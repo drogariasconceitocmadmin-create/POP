@@ -3601,6 +3601,357 @@ function popEsNaoInformadoLiteral_(s) {
   );
 }
 
+// =============================================================================
+// Fase 2 — Score operacional (conceito Matriz_Mae / execução)
+// Motor puro: não persiste dados; calcula a partir de itens avaliados (Sim/Não/N/A).
+// =============================================================================
+
+/** Seções críticas (nomes canônicos; comparação via iaBagNorm_). */
+function scoreConceitoListaSecoesCriticasNorm_() {
+  return [
+    iaBagNorm_('Atendimento no balcão de medicamentos'),
+    iaBagNorm_('Atendimento farmacêutico'),
+    iaBagNorm_('Caixa e fechamento'),
+    iaBagNorm_('Retirada e entrega de pedidos'),
+  ];
+}
+
+function scoreConceitoEhSecaoCritica_(secaoRaw) {
+  var n = iaBagNorm_(secaoRaw || '');
+  var list = scoreConceitoListaSecoesCriticasNorm_();
+  for (var i = 0; i < list.length; i++) {
+    if (list[i] === n) return true;
+  }
+  return false;
+}
+
+/** resultado: sim | nao | na | '' (desconhecido tratado como fora do cálculo). */
+function scoreConceitoNormalizarResultado_(r) {
+  var x = iaBagNorm_(String(r == null ? '' : r));
+  if (!x) return '';
+  if (x === 'sim' || x === 's' || x === 'ok' || x === 'conforme' || x === 'cumprido') return 'sim';
+  if (x === 'nao' || x === 'n') return 'nao';
+  if (x === 'na' || x === 'n/a' || x === 's.o.' || x === 'so' || x === 'nao se aplica' || x === 'nao aplicavel' || x === 'inexistente') return 'na';
+  return '';
+}
+
+function scoreConceitoNormalizarGravidade_(g) {
+  var x = iaBagNorm_(String(g == null ? '' : g));
+  if (!x) return 'normal';
+  if (x === 'critica' || x === 'critico' || x === 'critical') return 'critica';
+  return 'normal';
+}
+
+function scoreConceitoAcaoCorretivaPadraoPorCodigo_(codigo) {
+  var c = String(codigo || '').trim();
+  var map = {
+    TEST_CRIT_X: 'Acionamento imediato da gestão e bloqueio operacional até correção documentada.',
+  };
+  if (map[c]) return map[c];
+  return 'Registrar não conformidade, corrigir causa raiz e agendar reauditoria no ciclo da loja.';
+}
+
+function scoreConceitoItemPreparado_(item) {
+  var res = scoreConceitoNormalizarResultado_(item && item.resultado);
+  var grav = scoreConceitoNormalizarGravidade_(item && item.gravidade);
+  return {
+    codigo: String(item && item.codigo != null ? item.codigo : ''),
+    secao: String(item && item.secao != null ? item.secao : ''),
+    dimensao: String(item && item.dimensao != null ? item.dimensao : ''),
+    classificacao: String(item && item.classificacao != null ? item.classificacao : ''),
+    classificacao_norm: iaBagNorm_(item && item.classificacao),
+    padrao: String(item && item.padrao != null ? item.padrao : ''),
+    gravidade: grav,
+    resultado: res,
+    aplicavel: res === 'sim' || res === 'nao',
+    ponto: res === 'sim' ? 1 : res === 'nao' ? 0 : null,
+  };
+}
+
+function scoreConceitoAcumularGrupo_(mapa, chave, prep) {
+  if (!prep.aplicavel) return;
+  var k = String(chave || '').trim() || '(sem chave)';
+  if (!mapa[k]) mapa[k] = { aplicaveis: 0, sim: 0, nao: 0 };
+  mapa[k].aplicaveis++;
+  if (prep.resultado === 'sim') mapa[k].sim++;
+  else mapa[k].nao++;
+}
+
+function scoreConceitoMapaParaScorePct_(mapa) {
+  var out = {};
+  var keys = Object.keys(mapa);
+  for (var i = 0; i < keys.length; i++) {
+    var g = mapa[keys[i]];
+    var pct = g.aplicaveis > 0 ? Math.round((g.sim / g.aplicaveis) * 10000) / 100 : null;
+    out[keys[i]] = { score: pct, aplicaveis: g.aplicaveis, sim: g.sim, nao: g.nao };
+  }
+  return out;
+}
+
+function scoreConceitoClassificarFaixa_(scoreGeral, falhaCritica) {
+  var s = Number(scoreGeral);
+  if (isNaN(s)) s = 0;
+  var band = 'fraco';
+  if (s >= 90) band = 'excelência operacional';
+  else if (s >= 80) band = 'bom padrão';
+  else if (s >= 70) band = 'instável';
+  if (falhaCritica && band === 'excelência operacional') band = 'bom padrão';
+  return band;
+}
+
+function scoreConceitoFalhaCorretivaDeItem_(prep) {
+  return {
+    codigo: prep.codigo,
+    secao: prep.secao,
+    dimensao: prep.dimensao,
+    classificacao: prep.classificacao,
+    padrao: prep.padrao || prep.codigo,
+    gravidade: prep.gravidade,
+    acao_corretiva_padrao: scoreConceitoAcaoCorretivaPadraoPorCodigo_(prep.codigo),
+    responsavel_correcao: '',
+    prazo_correcao: '',
+    status_correcao: 'aberta',
+    data_reauditoria_prevista: null,
+  };
+}
+
+/**
+ * Motor de score operacional (Matriz_Mae conceito).
+ * Regra: Sim=1, Não=0, N/A fora do denominador; score = sim/aplicáveis*100.
+ *
+ * @param {Array<Object>} itens { codigo, secao, dimensao, classificacao, gravidade, resultado, padrao? }
+ * @param {Object=} opcoes reservado (fase futura)
+ * @returns {Object}
+ */
+function calcularScoreExecucaoConceito_(itens, opcoes) {
+  void opcoes;
+  var arr = Array.isArray(itens) ? itens : [];
+  var preps = [];
+  var total_itens = arr.length;
+  var total_aplicaveis = 0;
+  var total_sim = 0;
+  var total_nao = 0;
+  var total_na = 0;
+  var falhasCriticasArr = [];
+  var porDim = {};
+  var porSec = {};
+  var porCls = {};
+  var gestaoCorretiva = [];
+
+  for (var i = 0; i < arr.length; i++) {
+    var prep = scoreConceitoItemPreparado_(arr[i]);
+    preps.push(prep);
+    if (!prep.aplicavel) {
+      total_na++;
+      continue;
+    }
+    total_aplicaveis++;
+    if (prep.resultado === 'sim') total_sim++;
+    else total_nao++;
+    if (prep.resultado === 'nao' && prep.gravidade === 'critica') falhasCriticasArr.push(prep);
+    scoreConceitoAcumularGrupo_(porDim, prep.dimensao, prep);
+    scoreConceitoAcumularGrupo_(porSec, prep.secao, prep);
+    scoreConceitoAcumularGrupo_(porCls, prep.classificacao, prep);
+    if (prep.resultado === 'nao') gestaoCorretiva.push(scoreConceitoFalhaCorretivaDeItem_(prep));
+  }
+
+  var score_geral = total_aplicaveis > 0 ? Math.round((total_sim / total_aplicaveis) * 10000) / 100 : null;
+  var falha_critica = falhasCriticasArr.length > 0;
+  var alerta_vermelho = falhasCriticasArr.length >= 2;
+  var score_por_dimensao = scoreConceitoMapaParaScorePct_(porDim);
+  var score_por_secao = scoreConceitoMapaParaScorePct_(porSec);
+  var score_por_classificacao = scoreConceitoMapaParaScorePct_(porCls);
+
+  var prioridade_gerencial = false;
+  var risco_operacional = false;
+  var secKeys = Object.keys(porSec);
+  for (var k = 0; k < secKeys.length; k++) {
+    if (!scoreConceitoEhSecaoCritica_(secKeys[k])) continue;
+    var b = porSec[secKeys[k]];
+    if (!b || b.aplicaveis < 1) continue;
+    var sc = (b.sim / b.aplicaveis) * 100;
+    if (sc < 80) prioridade_gerencial = true;
+    if (sc < 70) risco_operacional = true;
+  }
+
+  var padroes_resultado_nao = [];
+  var padroes_criticos_reprovados = [];
+  for (var p = 0; p < preps.length; p++) {
+    var pr = preps[p];
+    if (pr.resultado !== 'nao') continue;
+    var row = {
+      codigo: pr.codigo,
+      secao: pr.secao,
+      dimensao: pr.dimensao,
+      classificacao: pr.classificacao,
+      gravidade: pr.gravidade,
+    };
+    padroes_resultado_nao.push(row);
+    if (pr.gravidade === 'critica') padroes_criticos_reprovados.push(row);
+  }
+
+  var ordPiores = preps
+    .filter(function (x) {
+      return x.aplicavel;
+    })
+    .slice()
+    .sort(function (a, b) {
+      var an = a.resultado === 'nao' ? 0 : 1;
+      var bn = b.resultado === 'nao' ? 0 : 1;
+      if (an !== bn) return an - bn;
+      var ac = a.gravidade === 'critica' && a.resultado === 'nao' ? 0 : 1;
+      var bc = b.gravidade === 'critica' && b.resultado === 'nao' ? 0 : 1;
+      if (ac !== bc) return ac - bc;
+      return String(a.codigo).localeCompare(String(b.codigo));
+    });
+  var piores_padroes = ordPiores.slice(0, 15).map(function (x) {
+    return {
+      codigo: x.codigo,
+      secao: x.secao,
+      dimensao: x.dimensao,
+      classificacao: x.classificacao,
+      resultado: x.resultado,
+      gravidade: x.gravidade,
+    };
+  });
+
+  var basicos = preps.filter(function (x) {
+    if (!x.aplicavel) return false;
+    var cn = x.classificacao_norm;
+    return cn.indexOf('basico') >= 0 || cn === 'basica' || cn.indexOf('padrao basico') >= 0;
+  });
+  var padroes_basicos_pior_desempenho = basicos
+    .slice()
+    .sort(function (a, b) {
+      var an = a.resultado === 'nao' ? 0 : 1;
+      var bn = b.resultado === 'nao' ? 0 : 1;
+      if (an !== bn) return an - bn;
+      return String(a.codigo).localeCompare(String(b.codigo));
+    })
+    .slice(0, 15)
+    .map(function (x) {
+      return { codigo: x.codigo, secao: x.secao, dimensao: x.dimensao, resultado: x.resultado, classificacao: x.classificacao };
+    });
+
+  var status_operacional = scoreConceitoClassificarFaixa_(score_geral == null ? 0 : score_geral, falha_critica);
+
+  return {
+    score_geral: score_geral,
+    score_por_dimensao: score_por_dimensao,
+    score_por_secao: score_por_secao,
+    score_por_classificacao: score_por_classificacao,
+    total_itens: total_itens,
+    total_aplicaveis: total_aplicaveis,
+    total_sim: total_sim,
+    total_nao: total_nao,
+    total_na: total_na,
+    falhas_criticas: falhasCriticasArr,
+    total_falhas_criticas: falhasCriticasArr.length,
+    falha_critica: falha_critica,
+    alerta_vermelho: alerta_vermelho,
+    prioridade_gerencial: prioridade_gerencial,
+    risco_operacional: risco_operacional,
+    status_operacional: status_operacional,
+    gestao_corretiva: gestao_corretiva,
+    piores_padroes: piores_padroes,
+    padroes_resultado_nao: padroes_resultado_nao,
+    padroes_criticos_reprovados: padroes_criticos_reprovados,
+    padroes_basicos_pior_desempenho: padroes_basicos_pior_desempenho,
+  };
+}
+
+/**
+ * Self-test do motor de score (sem Sheets).
+ * @returns {{ ok: boolean, casos: Array<{ id: number, nome: string, ok: boolean, detalhe?: Object }> }}
+ */
+function scoreSelfTestConceito_() {
+  function item(cod, sec, dim, cls, grav, res, pad) {
+    return {
+      codigo: cod,
+      secao: sec,
+      dimensao: dim,
+      classificacao: cls,
+      gravidade: grav,
+      resultado: res,
+      padrao: pad || cod,
+    };
+  }
+  var casos = [];
+
+  // 1) perfeito
+  var r1 = calcularScoreExecucaoConceito_([
+    item('A1', 'Outra', 'D1', 'Básico', 'normal', 'Sim', ''),
+    item('A2', 'Outra', 'D1', 'Básico', 'normal', 'Sim', ''),
+  ]);
+  var ok1 = r1.score_geral === 100 && r1.status_operacional === 'excelência operacional' && !r1.falha_critica && !r1.alerta_vermelho;
+  casos.push({ id: 1, nome: 'score perfeito', ok: ok1, detalhe: { score: r1.score_geral, status: r1.status_operacional } });
+
+  // 2) um Não normal
+  var r2 = calcularScoreExecucaoConceito_([
+    item('B1', 'Outra', 'D1', 'Básico', 'normal', 'Sim', ''),
+    item('B2', 'Outra', 'D1', 'Básico', 'normal', 'Não', ''),
+  ]);
+  var ok2 = r2.score_geral < 100 && !r2.falha_critica && !r2.alerta_vermelho;
+  casos.push({ id: 2, nome: 'um Não normal', ok: ok2, detalhe: { score: r2.score_geral, falha: r2.falha_critica } });
+
+  // 3) um Não crítico com score alto
+  var r3 = calcularScoreExecucaoConceito_([
+    item('C0', 'Outra', 'D1', 'Crítico', 'critica', 'Sim', ''),
+    item('C1', 'Outra', 'D1', 'Crítico', 'critica', 'Sim', ''),
+    item('C2', 'Outra', 'D1', 'Crítico', 'critica', 'Sim', ''),
+    item('C3', 'Outra', 'D1', 'Crítico', 'critica', 'Sim', ''),
+    item('C4', 'Outra', 'D1', 'Crítico', 'critica', 'Sim', ''),
+    item('C5', 'Outra', 'D1', 'Crítico', 'critica', 'Sim', ''),
+    item('C6', 'Outra', 'D1', 'Crítico', 'critica', 'Sim', ''),
+    item('C7', 'Outra', 'D1', 'Crítico', 'critica', 'Sim', ''),
+    item('C8', 'Outra', 'D1', 'Crítico', 'critica', 'Sim', ''),
+    item('C9', 'Outra', 'D1', 'Crítico', 'critica', 'Não', ''),
+  ]);
+  var ok3 = r3.score_geral >= 90 && r3.falha_critica && r3.status_operacional !== 'excelência operacional';
+  casos.push({ id: 3, nome: 'Não crítico bloqueia excelência', ok: ok3, detalhe: { score: r3.score_geral, status: r3.status_operacional } });
+
+  // 4) duas falhas críticas
+  var r4 = calcularScoreExecucaoConceito_([
+    item('D1', 'Outra', 'D1', 'Crítico', 'critica', 'Não', ''),
+    item('D2', 'Outra', 'D1', 'Crítico', 'critica', 'Não', ''),
+    item('D3', 'Outra', 'D1', 'Crítico', 'critica', 'Sim', ''),
+  ]);
+  var ok4 = r4.alerta_vermelho && r4.total_falhas_criticas >= 2;
+  casos.push({ id: 4, nome: 'duas falhas críticas', ok: ok4, detalhe: { alerta: r4.alerta_vermelho } });
+
+  // 5) N/A fora
+  var r5 = calcularScoreExecucaoConceito_([
+    item('E1', 'Outra', 'D1', 'Básico', 'normal', 'Sim', ''),
+    item('E2', 'Outra', 'D1', 'Básico', 'normal', 'N/A', ''),
+    item('E3', 'Outra', 'D1', 'Básico', 'normal', 'Não', ''),
+  ]);
+  var ok5 = r5.total_aplicaveis === 2 && r5.total_na === 1 && r5.score_geral === 50;
+  casos.push({ id: 5, nome: 'N/A fora do denominador', ok: ok5, detalhe: { aplicaveis: r5.total_aplicaveis, na: r5.total_na, score: r5.score_geral } });
+
+  // 6) seção crítica < 80 e >= 70 (75%)
+  var secCrit80 = 'Caixa e fechamento';
+  var it6 = [];
+  for (var i6 = 0; i6 < 15; i6++) it6.push(item('F' + i6, secCrit80, 'D1', 'Básico', 'normal', 'Sim', ''));
+  for (var j6 = 0; j6 < 5; j6++) it6.push(item('G' + j6, secCrit80, 'D1', 'Básico', 'normal', 'Não', ''));
+  var r6 = calcularScoreExecucaoConceito_(it6);
+  var ok6 = r6.prioridade_gerencial === true && r6.risco_operacional === false;
+  casos.push({ id: 6, nome: 'seção crítica <80', ok: ok6, detalhe: { secScore: r6.score_por_secao[secCrit80] } });
+
+  // 7) seção crítica < 70
+  var secCrit70 = 'Atendimento farmacêutico';
+  var it7 = [];
+  for (var i7 = 0; i7 < 3; i7++) it7.push(item('H' + i7, secCrit70, 'D1', 'Básico', 'normal', 'Sim', ''));
+  for (var j7 = 0; j7 < 10; j7++) it7.push(item('I' + j7, secCrit70, 'D1', 'Básico', 'normal', 'Não', ''));
+  var r7 = calcularScoreExecucaoConceito_(it7);
+  var ok7 = r7.risco_operacional === true;
+  casos.push({ id: 7, nome: 'seção crítica <70', ok: ok7, detalhe: { secScore: r7.score_por_secao[secCrit70] } });
+
+  var allOk = casos.every(function (c) {
+    return c.ok;
+  });
+  return { ok: allOk, casos: casos };
+}
+
 /**
  * Executar no editor Apps Script: valida que os casos conhecidos normalizam para "nao informado".
  * @returns {{ ok: boolean, detalhes: Array<{entrada: string, normalizado: string, esperado: string, pass: boolean}> }}
