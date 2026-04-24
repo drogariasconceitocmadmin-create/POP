@@ -2366,6 +2366,9 @@ function iaMotorGenericosPatronesDeteccao_() {
     { re: /\bdemonstrar\s+empatia\b/, termo: 'demonstrar empatia' },
     { re: /\bdemonstrar\s+interesse\b/, termo: 'demonstrar interesse' },
     { re: /\bdemonstrar\s+seguranca\b/, termo: 'demonstrar segurança' },
+    { re: /\batender\s+com\s+atencao\b/, termo: 'atender com atenção' },
+    { re: /\bfazer\s+com\s+atencao\b/, termo: 'fazer com atenção' },
+    { re: /\brealizar\s+com\s+atencao\b/, termo: 'realizar com atenção' },
     { re: /\bagir\s+com\s+atencao\b/, termo: 'agir com atenção' },
     { re: /\bcom\s+atencao\b/, termo: 'com atenção' },
     { re: /\batendimento\s+adequado\b/, termo: 'atendimento adequado' },
@@ -2437,8 +2440,9 @@ function iaSanearStringGenericaContrato_(raw) {
   out = out.replace(/\bser\s+cordial\b/gi, 'cumprimentar o cliente, manter fala clara e confirmar a necessidade antes de avançar');
   out = out.replace(/\bdemonstrar\s+empatia\b/gi, 'permitir que o cliente conclua a fala e fazer uma pergunta objetiva sobre a necessidade');
   out = out.replace(/\bdemonstrar\s+interesse\b/gi, 'permitir que o cliente conclua a fala e fazer uma pergunta objetiva sobre a necessidade');
-  out = out.replace(/\bagir\s+com\s+atencao\b/gi, 'olhar para o cliente, confirmar a informação principal e repetir o próximo passo em frase curta');
-  out = out.replace(/\bcom\s+atencao\b/gi, 'olhar para o cliente, confirmar a informação principal e repetir o próximo passo em frase curta');
+  var repAtenObs = 'olhar para o cliente, confirmar a informação principal e repetir o próximo passo em frase curta';
+  out = out.replace(/\b(agir|fazer|realizar|atender)\s+com\s+aten[çc][aãáàâ]o\b/gi, repAtenObs);
+  out = out.replace(/\bcom\s+aten[çc][aãáàâ]o\b/gi, repAtenObs);
   out = out.replace(/\batendimento\s+adequado\b/gi, 'atendimento com pergunta de necessidade, confirmação do produto e fechamento sem dúvida do cliente');
   out = out.replace(/\bcorretamente\b/gi, 'executar a etapa conferindo o dado necessário e registrando a decisão quando aplicável');
   return out;
@@ -3586,6 +3590,13 @@ function iaMotorSelfTestContratoGenericoSaneamento_() {
     }
     return false;
   }
+  function aindaTemPadraoAtenProibido_(s) {
+    var n = iaBagNorm_(s);
+    return (
+      /\b(agir|fazer|realizar|atender)\s+com\s+atencao\b/.test(n) ||
+      /\bcom\s+atencao\b/.test(n)
+    );
+  }
   var casos = [];
 
   // 1) criterio_sucesso com "executar corretamente"
@@ -3634,13 +3645,31 @@ function iaMotorSelfTestContratoGenericoSaneamento_() {
   var s3 = String(c3.como_fazer_bem || '');
   var ok3 =
     !iaTemLinguagemGenerica_(c3) &&
+    !aindaTemPadraoAtenProibido_(s3) &&
     s3.indexOf('agir com atenção') < 0 &&
     s3.indexOf('agir com atencao') < 0 &&
     s3.indexOf('olhar para o cliente') >= 0 &&
     !bloqueiaGenerico(bloq3);
   casos.push({ id: 3, nome: 'como_fazer_bem agir com atenção', ok: ok3, bloq: bloq3, como_fazer_bem: c3.como_fazer_bem });
 
-  // 4) demonstrar segurança — sem saneamento; deve bloquear e detector traz campo/termo
+  // 4) atender com atenção
+  var c4a = baseCritico();
+  c4a.como_fazer_bem = 'atender com atenção';
+  for (var r4a = 0; r4a < 6; r4a++) {
+    if (!iaTemLinguagemGenerica_(c4a)) break;
+    iaSanearLinguagemGenericaContrato_(c4a, ctx1);
+  }
+  var bloq4a = validarContratoPopIaBloqueante_(c4a, 'critico', sit, err);
+  var s4a = String(c4a.como_fazer_bem || '');
+  var ok4a =
+    !iaTemLinguagemGenerica_(c4a) &&
+    !aindaTemPadraoAtenProibido_(s4a) &&
+    s4a.indexOf('atender com atenção') < 0 &&
+    s4a.indexOf('olhar para o cliente') >= 0 &&
+    !bloqueiaGenerico(bloq4a);
+  casos.push({ id: 4, nome: 'como_fazer_bem atender com atenção', ok: ok4a, bloq: bloq4a, como_fazer_bem: c4a.como_fazer_bem });
+
+  // 5) demonstrar segurança — sem saneamento; deve bloquear e detector traz campo/termo
   var c4 = baseCritico();
   c4.controle.criterio_sucesso = 'demonstrar segurança no balcão sempre';
   var det4 = iaDetectarLinguagemGenericaDetalhada_(c4);
@@ -3650,7 +3679,7 @@ function iaMotorSelfTestContratoGenericoSaneamento_() {
   }
   var bloq4 = validarContratoPopIaBloqueante_(c4, 'critico', sit, err);
   var ok4 = bloqueiaGenerico(bloq4) && det4.length > 0 && det4[0].campo && det4[0].termo;
-  casos.push({ id: 4, nome: 'demonstrar segurança bloqueia', ok: ok4, bloq: bloq4, primeiroDet: det4[0] || null });
+  casos.push({ id: 5, nome: 'demonstrar segurança bloqueia', ok: ok4, bloq: bloq4, primeiroDet: det4[0] || null });
 
   var allOk = casos.every(function (x) {
     return x.ok;
