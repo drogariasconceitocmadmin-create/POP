@@ -2396,7 +2396,7 @@ function iaMotorContagemTokens_(texto) {
 function iaMotorTemVerboAcao_(texto) {
   var s = iaBagNorm_(texto || '');
   if (!s) return false;
-  return /\b(falar|dizer|perguntar|responder|explicar|ouvir|olhar|encarar|manter|segurar|apoiar|virar|deixar|levantar|abaixar|apontar|girar|andar|parar|aproximar|afastar|bater|cumprimentar|acenar|esperar|chamar|confirmar|validar|verificar|conferir|checar|ler|mostrar|entregar|abrir|fechar|ligar|desligar|anotar|registar|registrar|escrever|assinar|marcar|indicar|apresentar|repetir|separar|pesar|medir|rotular|etiquetar|armazenar|guardar|limpar|higienizar|desinfetar|empacotar|orientar|avisar|informar|fazer|organizar|repor|recolocar|posicionar|alinhar)\b/.test(
+  return /\b(falar|dizer|perguntar|responder|explicar|ouvir|olhar|encarar|manter|segurar|apoiar|virar|deixar|levantar|abaixar|apontar|girar|andar|parar|aproximar|afastar|bater|cumprimentar|acenar|esperar|chamar|confirmar|validar|verificar|conferir|checar|ler|mostrar|entregar|abrir|fechar|ligar|desligar|anotar|registar|registrar|escrever|assinar|marcar|indicar|apresentar|repetir|separar|pesar|medir|rotular|etiquetar|armazenar|guardar|limpar|higienizar|desinfetar|empacotar|orientar|avisar|informar|fazer|organizar|repor|recolocar|posicionar|alinhar|ignorar|ignora|omitir|omite|demorar|demora|interromper|interrompe|opinar|opina|prometer|promete|sugerir|sugere|confundir|confunde|esquecer|esquece|bloquear|bloqueia|devolver|devolve|misturar|mistura)\b/.test(
     s
   );
 }
@@ -2525,6 +2525,30 @@ function iaMotorQaChecklistIncoming_(mergedIn, contract) {
   if (!String(exec.tempo || '').trim()) falhas.push({ codigo: 'tempo_definido', mensagem: 'Tempo da execução não definido no contrato.' });
   if (!String(exec.frequencia || '').trim()) falhas.push({ codigo: 'frequencia_definida', mensagem: 'Frequência da execução não definida no contrato.' });
   if (!String(m.metrica || '').trim()) falhas.push({ codigo: 'metrica', mensagem: 'Métrica ausente no payload.' });
+  else if (popMetricaFracaPublicacao_(m.metrica)) {
+    falhas.push({ codigo: 'metrica_fraca', mensagem: 'Métrica vaga ou sem padrão mensurável no payload.' });
+  }
+  if (String(m.treinamento || '').trim() && popTreinamentoFracoPublicacao_(m.treinamento)) {
+    falhas.push({ codigo: 'treinamento_fraco', mensagem: 'Treinamento vago ou sem 2 ações práticas observáveis.' });
+  }
+  if (popObjetivoContaminadoBriefingIa_(m.titulo, m.objetivo)) {
+    falhas.push({
+      codigo: 'objetivo_briefing',
+      mensagem: 'Objetivo contaminado pelo briefing (falta parágrafo de resultado antes do contexto).',
+    });
+  }
+  if (!Array.isArray(m.checklist_lider) || m.checklist_lider.length < 3) {
+    falhas.push({ codigo: 'checklist_lider_min', mensagem: 'Checklist do líder precisa de pelo menos 3 itens.' });
+  }
+  if (!Array.isArray(m.pontos_criticos) || m.pontos_criticos.length < 3) {
+    falhas.push({ codigo: 'pontos_criticos_min', mensagem: 'Pontos críticos precisam de pelo menos 3 itens.' });
+  }
+  if (!Array.isArray(m.pontosDeAtencao) || m.pontosDeAtencao.length < 3) {
+    falhas.push({ codigo: 'pontos_atencao_min', mensagem: 'Pontos de atenção precisam de pelo menos 3 itens.' });
+  }
+  if (!Array.isArray(m.desvios) || m.desvios.length < 3) {
+    falhas.push({ codigo: 'desvios_min', mensagem: 'Desvios precisam de pelo menos 3 cenários.' });
+  }
 
   var critBlob = iaBagNorm_(String(ctl.criterio_sucesso || '') + ' ' + String(m.metrica || ''));
   var mensur =
@@ -2690,6 +2714,8 @@ function iaMotorCompletarColaborativoGeracaoIa_(mergedIn, contract, pIn, sIn, eI
   if (normalizeTipoPop_(mergedIn.tipo) !== 'colaborativo') return mergedIn;
   var proc = normalizeText_(pIn || mergedIn.processo || '');
   var sit = normalizeText_(sIn || '');
+  var err = normalizeText_(eIn || '');
+  var ctxo = (contract && contract.contexto) || {};
 
   function vazio(s) {
     return !String(s == null ? '' : s).trim();
@@ -2721,46 +2747,73 @@ function iaMotorCompletarColaborativoGeracaoIa_(mergedIn, contract, pIn, sIn, eI
     ];
   }
   var chL = mergedIn.checklist_lider;
-  if (!Array.isArray(chL) || !chL.length) {
+  if (!Array.isArray(chL) || chL.length < 3) {
     mergedIn.checklist_lider = [
       'Na abertura de turno, confirmar com a equipa se já leu o POP de ' + proc + ' desta semana',
       'Em auditoria de piso, observar se os 3 primeiros passos do procedimento são visíveis no balcão',
+      'No fecho do turno, contar quantas ocorrências do caso "' + sit.slice(0, 70) + '" foram registadas no livro interno',
     ];
   }
   var desv = mergedIn.desvios;
-  if (!Array.isArray(desv) || !desv.length) {
+  if (!Array.isArray(desv) || desv.length < 3) {
     mergedIn.desvios = [
       'Interromper o cliente antes de ouvir o pedido completo no balcão',
       'Responder de costas ou sem olhar para o cliente quando há fila',
       'Seguir sem registo quando a situação exige rastreio interno',
     ];
   }
-  if (vazio(mergedIn.treinamento)) {
-    mergedIn.treinamento =
-      'Roteiro prático de 15 minutos no balcão: simulação com checklist impresso para o caso: ' + sit.slice(0, 100) + '.';
+  var treinTpl =
+    '1) Mostrar no balcão o fluxo de "' +
+    proc +
+    '" com um colega no papel de cliente para o caso: ' +
+    sit.slice(0, 90) +
+    '.\n' +
+    '2) Verificar no turno, com checklist impresso, se cada colaborador repetiu o fluxo uma vez no chão.';
+  if (vazio(mergedIn.treinamento) || popTreinamentoFracoPublicacao_(mergedIn.treinamento)) {
+    mergedIn.treinamento = treinTpl;
   }
   if (vazio(mergedIn.metrica) && contract && contract.controle) {
     mergedIn.metrica = normalizeText_(contract.controle.metrica || '');
   }
-  if (vazio(mergedIn.metrica)) {
+  if (vazio(mergedIn.metrica) || popMetricaFracaPublicacao_(mergedIn.metrica)) {
     mergedIn.metrica =
       'Percentagem de atendimentos em ' +
       proc +
-      ' sem repetir o mesmo incidente na semana (registo interno ou checklist do líder)';
+      ' sem repetir o mesmo incidente na semana (registo interno ou checklist do líder com contagem por turno)';
   }
-  if (!Array.isArray(mergedIn.pontos_criticos) || !mergedIn.pontos_criticos.length) {
+  if (!Array.isArray(mergedIn.pontos_criticos) || mergedIn.pontos_criticos.length < 3) {
     mergedIn.pontos_criticos = [
       'Tom: voz calma e ritmo pausado junto ao cliente no balcão',
       'Postura: ombros abertos, frente ao cliente, sem cruzar braços',
+      'Critério de sucesso: cliente repete em uma frase o que precisa e o colaborador confirma antes de dispensar a orientação final',
     ];
   }
   var pda = mergedIn.pontosDeAtencao;
-  if (!Array.isArray(pda) || !pda.length) {
+  if (!Array.isArray(pda) || pda.length < 3) {
     mergedIn.pontosDeAtencao = [
       'Fala / script: explicar ao cliente que vai confirmar a informação antes de concluir',
-      'Critério de sucesso: cliente repete em uma frase o que precisa e o colaborador confirma',
+      'Postura: manter o corpo voltado ao cliente enquanto consulta preço ou stock no terminal',
+      'Critério de sucesso: o pedido ou a dúvida fica escrito no verso do talão interno quando o caso exige rastreio',
     ];
   }
+
+  var qWhen = normalizeText_(ctxo.quando_aplicar || '');
+  var blocoResultado = [
+    'No processo "' + proc + '", reduzir retrabalho no balcão e manter o cliente informado até encerrar o pedido com segurança.',
+    'Impacto no cliente: espera previsível, resposta alinhada ao risco do caso e sem promessa que não possa cumprir no mesmo dia.',
+    'Segurança operacional: qualquer dúvida clínica ou legal segue o encaminhamento interno antes de decisão isolada no balcão.',
+  ].join('\n');
+  var refBloco = ['--- Contexto informado ---', 'Situação: ' + sit, 'Erro ou risco: ' + err].join('\n');
+  var headAntigo = String(mergedIn.objetivo || '').split('--- Contexto informado ---')[0].trim();
+  var repetirHead =
+    qWhen &&
+    sit &&
+    iaBagNorm_(headAntigo).indexOf(iaBagNorm_(qWhen)) >= 0 &&
+    headAntigo.length < 200;
+  var detalheAplic = '';
+  if (qWhen && !repetirHead) detalheAplic = '\n\nDetalhe de aplicabilidade: ' + qWhen.slice(0, 280);
+  mergedIn.objetivo = blocoResultado + detalheAplic + '\n\n' + refBloco;
+
   return mergedIn;
 }
 
@@ -2934,6 +2987,14 @@ function iaMotorSelfTestCriadorPopDezCenarios_() {
     { id: 9, titulo: 'Conferência no caixa', proc: 'Abertura/fechamento de caixa', sit: 'Fecho de caixa com diferença pequena', err: 'Seguir sem dupla contagem ou registo do responsável' },
     { id: 10, titulo: 'Retirada ou entrega de pedido', proc: 'Separação e expedição', sit: 'Cliente retira encomenda no balcão', err: 'Entrega sem conferir identidade ou código do pedido' },
   ];
+  function catalogoParPorProcesso_(processoKey) {
+    var cat = getProcessosCatalog_();
+    var want = normalizeText_(processoKey);
+    for (var h = 0; h < cat.length; h++) {
+      if (normalizeText_(cat[h].processo) === want) return { area: cat[h].area, processo: cat[h].processo };
+    }
+    return null;
+  }
   function stubContrato(titulo, area, processo, sit, err) {
     var steps = [
       'Olhar o cliente nos olhos e ouvir o pedido completo no balcão',
@@ -2975,13 +3036,25 @@ function iaMotorSelfTestCriadorPopDezCenarios_() {
   var allOk = true;
   for (var i = 0; i < cenarios.length; i++) {
     var sc = cenarios[i];
-    var area = 'Atendimento e vendas';
-    if (sc.proc === 'Dispensação') area = 'Medicamentos e controle farmacêutico';
-    else if (sc.proc === 'Rotina operacional da loja' || sc.proc === 'Organização e limpeza') area = 'Loja e operação diária';
-    else if (sc.proc === 'Abertura/fechamento de caixa') area = 'Caixa e financeiro operacional';
-    else if (sc.proc === 'Separação e expedição') area = 'Delivery e expedição';
+    var parCat = catalogoParPorProcesso_(sc.proc);
+    if (!parCat) {
+      allOk = false;
+      out.push({
+        id: sc.id,
+        titulo: sc.titulo,
+        gerouSemErro: 'NAO',
+        veioCompleto: 'NAO',
+        modoExecucaoClaro: 'NAO',
+        portalMinimoSemantico: 'NAO',
+        publicacaoBloqueada: 'NAO',
+        motivoBloqueioPublicacao: '',
+        contratoBloqueante: ['processo fora do catálogo: ' + sc.proc],
+        falhasQaMotor: [],
+      });
+      continue;
+    }
 
-    var c = stubContrato(sc.titulo, area, sc.proc, sc.sit, sc.err);
+    var c = stubContrato(sc.titulo, parCat.area, parCat.processo, sc.sit, sc.err);
     var bloq = validarContratoPopIaBloqueante_(c, 'colaborativo', sc.sit, sc.err);
     var gerouOk = !bloq.length;
     if (!gerouOk) {
@@ -3026,13 +3099,15 @@ function iaMotorSelfTestCriadorPopDezCenarios_() {
         Array.isArray(mergedIn.procedimento) &&
         countProcedimentoEtapasValidas_(mergedIn.procedimento) >= 3 &&
         Array.isArray(mergedIn.pontos_criticos) &&
-        mergedIn.pontos_criticos.length &&
+        mergedIn.pontos_criticos.length >= 3 &&
+        Array.isArray(mergedIn.pontosDeAtencao) &&
+        mergedIn.pontosDeAtencao.length >= 3 &&
         Array.isArray(mergedIn.checklist_lider) &&
-        mergedIn.checklist_lider.length &&
+        mergedIn.checklist_lider.length >= 3 &&
         Array.isArray(mergedIn.checklist) &&
         mergedIn.checklist.length >= 5 &&
         Array.isArray(mergedIn.desvios) &&
-        mergedIn.desvios.length &&
+        mergedIn.desvios.length >= 3 &&
         !!String(mergedIn.metrica || '').trim() &&
         !!String(mergedIn.treinamento || '').trim() &&
         !!String(mergedIn.como_fazer_bem || '').trim() &&
@@ -3825,7 +3900,7 @@ var POP_PUBLISH_MIN_CHECKLIST_ = 5;
 var POP_PUBLISH_MIN_PROC_COLAB_ = 3;
 var POP_PUBLISH_MIN_PROC_CRITICO_ = 3;
 var POP_PUBLISH_MIN_OBJETIVO_LEN_ = 35;
-var POP_PUBLISH_MIN_METRICA_LEN_ = 12;
+var POP_PUBLISH_MIN_METRICA_LEN_ = 25;
 
 /**
  * Normalização determinística para comparar placeholders (não usar iaBagNorm_ aqui).
@@ -4259,6 +4334,86 @@ function popValidarChecklistPublicacao_(checklistArr) {
   return erros;
 }
 
+/** Métrica sem evidência mensurável ou com frases genéricas (publicação + completador + QA motor). */
+function popMetricaFracaPublicacao_(raw) {
+  var t = normalizeText_(raw || '');
+  if (!t) return 'metrica ausente';
+  var s = iaBagNorm_(t);
+  var ban = [
+    'atendimento correto',
+    'qualidade do atendimento',
+    'execucao adequada',
+    'processo realizado corretamente',
+    'atendimento adequado',
+    'qualidade adequada',
+    'desempenho adequado',
+    'execucao correta',
+  ];
+  for (var i = 0; i < ban.length; i++) {
+    if (s.indexOf(ban[i]) >= 0) return 'metrica vaga';
+  }
+  if (t.length < POP_PUBLISH_MIN_METRICA_LEN_) return 'metrica insuficiente';
+  var mens =
+    /\b(%|percentagem|porcentagem|\d+)\b/.test(s) ||
+    /\b(contagem|checklist|prazo|minutos|minuto|dias|dia|semana|semanal|diario|diário|registro|registo|zero\s|nenhum\s|9\s*de\s*10|10\s*de\s*10|sim\s*\/\s*nao|sim\s*\/\s*não|binario|observacoes|observações)\b/.test(s);
+  if (!mens) return 'metrica sem padrão mensurável';
+  return '';
+}
+
+/** Treinamento sem 2 ações observáveis ou com frases vazias de consultoria. */
+function popTreinamentoFracoPublicacao_(raw) {
+  var t = normalizeText_(raw || '');
+  if (!t) return 'treinamento ausente';
+  var s = iaBagNorm_(t);
+  var ban = [
+    'orientar equipe',
+    'treinar colaboradores',
+    'reforcar procedimento',
+    'reforcar o procedimento',
+    'treinar a equipe',
+    'orientar os colaboradores',
+    'treinar os colaboradores',
+    'reforcar treinamento',
+  ];
+  for (var j = 0; j < ban.length; j++) {
+    if (s.indexOf(ban[j]) >= 0) return 'treinamento vago';
+  }
+  var linhas = t.split(/\n+/);
+  var comNumeroEAcao = 0;
+  for (var k = 0; k < linhas.length; k++) {
+    var ln = normalizeText_(linhas[k]);
+    if (!ln) continue;
+    if (/^\d+[\.\)]\s+/.test(ln) && iaMotorTemVerboAcao_(ln)) comNumeroEAcao++;
+  }
+  var palObs =
+    /\b(simulacao|simulação|demonstracao|demonstração|observacao\s+no\s+turno|observação\s+no\s+turno|role\s*play|pratica\s+guiada|prática\s+guiada|repeticao|repetição)\b/.test(s);
+  if (comNumeroEAcao >= 2) return '';
+  if (comNumeroEAcao >= 1 && palObs && t.length >= 55) return '';
+  var partes = t.split(/;|\|/).map(function (x) {
+    return normalizeText_(x);
+  }).filter(Boolean);
+  var verbos = 0;
+  for (var p = 0; p < partes.length; p++) {
+    if (iaMotorTemVerboAcao_(partes[p])) verbos++;
+  }
+  if (verbos >= 2 && t.length >= 50) return '';
+  if (t.length >= 100 && verbos >= 1 && palObs) return '';
+  return 'treinamento sem 2 ações práticas observáveis';
+}
+
+/**
+ * Objetivo gerado pela IA com bloco de briefing mas sem parágrafo de resultado antes do marcador.
+ */
+function popObjetivoContaminadoBriefingIa_(titulo, objetivo) {
+  var o = normalizeText_(objetivo || '');
+  if (!o || o.indexOf('--- Contexto informado ---') < 0) return '';
+  var head = o.split('--- Contexto informado ---')[0].trim();
+  if (head.length < 80) return 'briefing';
+  var hb = iaBagNorm_(head).replace(/\s+/g, ' ');
+  if (hb.indexOf('quando no piso ocorre') === 0 && head.length < 170) return 'colagem';
+  return '';
+}
+
 function popObjetivoContaminadoOuFraco_(titulo, objetivo) {
   var o = normalizeText_(objetivo);
   if (!o) return 'objetivo ausente';
@@ -4321,6 +4476,7 @@ function popValidacaoConteudoBloqueantePublicacao_(pop) {
       else if (objMsg.indexOf('insuficiente') >= 0) erros.push('objetivo insuficiente');
       else erros.push(objMsg);
     }
+    if (popObjetivoContaminadoBriefingIa_(pop.titulo, objStr)) erros.push('objetivo contaminado');
   }
 
   if (tipo === 'colaborativo') {
@@ -4350,8 +4506,21 @@ function popValidacaoConteudoBloqueantePublicacao_(pop) {
 
     var metRaw = popTextoCampoPublicacao_(cj.metrica || '');
     if (popEsNaoInformadoLiteral_(metRaw)) erros.push('campo essencial com placeholder inválido: metrica');
-    else if (metRaw.length < POP_PUBLISH_MIN_METRICA_LEN_) {
-      erros.push('metrica ausente ou insuficiente (mínimo ' + POP_PUBLISH_MIN_METRICA_LEN_ + ' caracteres)');
+    else {
+      var metF = popMetricaFracaPublicacao_(metRaw);
+      if (metF === 'metrica insuficiente') {
+        erros.push('metrica ausente ou insuficiente (mínimo ' + POP_PUBLISH_MIN_METRICA_LEN_ + ' caracteres)');
+      } else if (metF) {
+        erros.push('metrica vaga ou não auditável');
+      }
+    }
+
+    var trRaw = popTextoCampoPublicacao_(cj.treinamento || '');
+    if (popEsNaoInformadoLiteral_(trRaw)) erros.push('campo essencial com placeholder inválido: treinamento');
+    else {
+      var trF = popTreinamentoFracoPublicacao_(trRaw);
+      if (trF === 'treinamento ausente') erros.push('treinamento ausente');
+      else if (trF) erros.push('treinamento vago ou sem ações práticas');
     }
 
     var proc = cj.procedimento;
@@ -4390,6 +4559,7 @@ function popValidacaoConteudoBloqueantePublicacao_(pop) {
     for (var ce = 0; ce < chkErr.length; ce++) {
       if (erros.indexOf(chkErr[ce]) < 0) erros.push(chkErr[ce]);
     }
+
   } else if (tipo === 'critico') {
     var normCrit = {
       tipo: 'critico',
@@ -4450,14 +4620,18 @@ function popFixtureColaborativoPublicacaoMinimoTeste_() {
       responsaveis: ['Farmacêutico', 'Atendente'],
       regra_de_ouro: 'Cliente sempre em primeiro lugar com postura acolhedora',
       frequencia: 'sempre que houver cliente',
-      pontos_criticos: ['Tom: voz clara e ritmo calmo com o cliente'],
-      checklist_lider: ['verificar fila', 'apoio ao caixa'],
-      desvios: ['postura fechada'],
-      treinamento: 'Integração ao onboarding da equipe',
+      pontos_criticos: ['Tom: voz clara e ritmo calmo com o cliente', 'Postura: ombros alinhados à frente do cliente'],
+      checklist_lider: ['verificar fila', 'apoio ao caixa', 'conferir uniforme e crachá antes do pico de atendimento'],
+      desvios: ['postura fechada', 'atendimento sem cumprimento ao cliente', 'uso de telemóvel pessoal visível no balcão'],
+      treinamento:
+        '1) Mostrar no balcão o fluxo completo com voz calma e contato visual com o cliente.\n2) Verificar no turno outro colaborador e marcar no checklist se cada etapa do procedimento foi cumprida.',
       metrica: 'Percentagem de atendimentos com checklist cumprida no dia',
       procedimento: proc,
       checklist: chk,
-      pontosDeAtencao: ['Postura: costas alinhadas e olhar para o cliente'],
+      pontosDeAtencao: [
+        'Postura: costas alinhadas e olhar para o cliente',
+        'Critério de sucesso: cliente confirma em voz alta que entendeu o próximo passo antes de sair do balcão',
+      ],
       como_fazer_bem:
         'Olhar para o cliente e falar em voz calma no balcão, explicando em duas frases o que acontece a seguir na farmácia',
       erro_critico: 'Ignorar o cliente ou desviar o olhar quando ele pede ajuda na gôndola',
@@ -4573,6 +4747,44 @@ function popSelfTestPublicacaoComoErroCaminhoReal_() {
   );
 
   run('conteudo_bom_fixture', {}, [], ['como_fazer_bem contém placeholder inválido', 'como_fazer_bem abstrato', 'erro_critico abstrato']);
+
+  run(
+    'metrica_vaga_atendimento_correto',
+    { metrica: 'atendimento correto' },
+    ['metrica vaga ou não auditável'],
+    []
+  );
+
+  run(
+    'treinamento_vago_orientar_equipe',
+    { treinamento: 'orientar equipe' },
+    ['treinamento vago ou sem ações práticas'],
+    []
+  );
+
+  run(
+    'objetivo_só_briefing_ia',
+    {
+      objetivo:
+        'Quando no piso ocorre: teste curto\n\n--- Contexto informado ---\nSituação: cliente no balcão\nErro ou risco: falha operacional',
+    },
+    ['objetivo contaminado'],
+    []
+  );
+
+  run(
+    'metrica_e_treino_fortes_passam',
+    {
+      metrica:
+        'Percentagem de atendimentos sem o mesmo incidente repetido na semana (meta: 95% verificada na checklist do líder)',
+      treinamento:
+        '1) Mostrar no balcão o fluxo com voz calma.\n2) Verificar no turno e contar quantos clientes receberam confirmação em voz alta do pedido.',
+      objetivo:
+        'Garantir atendimento seguro no balcão da farmácia com redução de reclamações repetidas no mesmo dia.\n\n--- Contexto informado ---\nSituação: fila no balcão\nErro ou risco: atendimento truncado',
+    },
+    [],
+    ['metrica vaga ou não auditável', 'treinamento vago ou sem ações práticas', 'objetivo contaminado']
+  );
 
   var allOk = true;
   for (var c = 0; c < casos.length; c++) {
