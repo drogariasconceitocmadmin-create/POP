@@ -2355,20 +2355,137 @@ function iaColetarStringsObj_(obj, out) {
   }
 }
 
-function iaTemLinguagemGenerica_(c) {
-  var parts = [];
-  iaColetarStringsObj_(c, parts);
-  var blob = parts
-    .join(' ')
-    .toLowerCase()
-    .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '');
-  var phrases = ['atender bem', 'ser cordial', 'fazer corretamente', 'com atencao'];
-  for (var i = 0; i < phrases.length; i++) {
-    if (blob.indexOf(phrases[i]) >= 0) return true;
+/** Padrões de linguagem genérica bloqueada no contrato IA (ordem: compostos antes de corretamente isolado). */
+function iaMotorGenericosPatronesDeteccao_() {
+  return [
+    { re: /\bexecutar\s+corretamente\b/, termo: 'executar corretamente' },
+    { re: /\bfazer\s+corretamente\b/, termo: 'fazer corretamente' },
+    { re: /\borientar\s+corretamente\b/, termo: 'orientar corretamente' },
+    { re: /\batender\s+bem\b/, termo: 'atender bem' },
+    { re: /\bser\s+cordial\b/, termo: 'ser cordial' },
+    { re: /\bdemonstrar\s+empatia\b/, termo: 'demonstrar empatia' },
+    { re: /\bdemonstrar\s+interesse\b/, termo: 'demonstrar interesse' },
+    { re: /\bdemonstrar\s+seguranca\b/, termo: 'demonstrar segurança' },
+    { re: /\bagir\s+com\s+atencao\b/, termo: 'agir com atenção' },
+    { re: /\bcom\s+atencao\b/, termo: 'com atenção' },
+    { re: /\batendimento\s+adequado\b/, termo: 'atendimento adequado' },
+    { re: /\bcorretamente\b/, termo: 'corretamente' },
+  ];
+}
+
+function iaDetectarLinguagemGenericaDetalhadaWalk_(o, path, out) {
+  if (o == null) return;
+  if (typeof o === 'string' || typeof o === 'number' || typeof o === 'boolean') {
+    var raw = String(o);
+    if (!String(raw).trim()) return;
+    var norm = iaBagNorm_(raw);
+    var pats = iaMotorGenericosPatronesDeteccao_();
+    for (var i = 0; i < pats.length; i++) {
+      if (pats[i].re.test(norm)) {
+        var m = norm.match(pats[i].re);
+        var idx = m && m.index != null ? m.index : 0;
+        var trecho =
+          raw.length <= 100 ? raw : raw.substring(Math.max(0, idx), Math.min(String(raw).length, idx + 90));
+        out.push({
+          campo: path || '(raiz)',
+          termo: pats[i].termo,
+          trecho: trecho,
+          valorOriginal: String(raw).length > 220 ? String(raw).slice(0, 220) + '…' : raw,
+        });
+      }
+    }
+    return;
   }
-  if (/\bcorretamente\b/.test(blob)) return true;
+  if (Array.isArray(o)) {
+    for (var j = 0; j < o.length; j++) {
+      var p2 = path ? path + '[' + j + ']' : '[' + j + ']';
+      iaDetectarLinguagemGenericaDetalhadaWalk_(o[j], p2, out);
+    }
+    return;
+  }
+  if (typeof o === 'object') {
+    for (var k in o) {
+      if (!Object.prototype.hasOwnProperty.call(o, k)) continue;
+      var nextPath = path ? path + '.' + k : k;
+      iaDetectarLinguagemGenericaDetalhadaWalk_(o[k], nextPath, out);
+    }
+  }
+}
+
+/**
+ * Lista ocorrências de linguagem genérica por campo (contrato IA bruto).
+ * @returns {Array<{ campo: string, termo: string, trecho: string, valorOriginal: string }>}
+ */
+function iaDetectarLinguagemGenericaDetalhada_(obj) {
+  var out = [];
+  iaDetectarLinguagemGenericaDetalhadaWalk_(obj, '', out);
+  return out;
+}
+
+function iaTemLinguagemGenerica_(c) {
+  return iaDetectarLinguagemGenericaDetalhada_(c).length > 0;
+}
+
+/** Substituições determinísticas (sem OpenAI) antes do bloqueio. */
+function iaSanearStringGenericaContrato_(raw) {
+  var out = String(raw == null ? '' : raw);
+  if (!out) return '';
+  out = out.replace(/\bexecutar\s+corretamente\b/gi, 'executar a etapa conferindo o dado necessário e registrando a decisão quando aplicável');
+  out = out.replace(/\bfazer\s+corretamente\b/gi, 'executar a etapa conferindo o dado necessário e registrando a decisão quando aplicável');
+  out = out.replace(/\borientar\s+corretamente\b/gi, 'explicar o próximo passo em frase curta e encaminhar ao farmacêutico quando houver dúvida técnica');
+  out = out.replace(/\batender\s+bem\b/gi, 'perguntar a necessidade do cliente antes de indicar qualquer produto');
+  out = out.replace(/\bser\s+cordial\b/gi, 'cumprimentar o cliente, manter fala clara e confirmar a necessidade antes de avançar');
+  out = out.replace(/\bdemonstrar\s+empatia\b/gi, 'permitir que o cliente conclua a fala e fazer uma pergunta objetiva sobre a necessidade');
+  out = out.replace(/\bdemonstrar\s+interesse\b/gi, 'permitir que o cliente conclua a fala e fazer uma pergunta objetiva sobre a necessidade');
+  out = out.replace(/\bagir\s+com\s+atencao\b/gi, 'olhar para o cliente, confirmar a informação principal e repetir o próximo passo em frase curta');
+  out = out.replace(/\bcom\s+atencao\b/gi, 'olhar para o cliente, confirmar a informação principal e repetir o próximo passo em frase curta');
+  out = out.replace(/\batendimento\s+adequado\b/gi, 'atendimento com pergunta de necessidade, confirmação do produto e fechamento sem dúvida do cliente');
+  out = out.replace(/\bcorretamente\b/gi, 'executar a etapa conferindo o dado necessário e registrando a decisão quando aplicável');
+  return out;
+}
+
+function iaSanearLinguagemGenericaContratoWalk_(o) {
+  var ch = false;
+  if (o == null) return false;
+  if (Array.isArray(o)) {
+    for (var i = 0; i < o.length; i++) {
+      if (typeof o[i] === 'string') {
+        var nn = iaSanearStringGenericaContrato_(o[i]);
+        if (nn !== o[i]) {
+          o[i] = nn;
+          ch = true;
+        }
+      } else if (iaSanearLinguagemGenericaContratoWalk_(o[i])) ch = true;
+    }
+    return ch;
+  }
+  if (typeof o === 'object') {
+    for (var k in o) {
+      if (!Object.prototype.hasOwnProperty.call(o, k)) continue;
+      var v = o[k];
+      if (typeof v === 'string') {
+        var n2 = iaSanearStringGenericaContrato_(v);
+        if (n2 !== v) {
+          o[k] = n2;
+          ch = true;
+        }
+      } else if (iaSanearLinguagemGenericaContratoWalk_(v)) ch = true;
+    }
+    return ch;
+  }
   return false;
+}
+
+/**
+ * Saneia in-place o contrato IA antes de validarContratoPopIaBloqueante_.
+ * @param {Object} contract contrato mutável
+ * @param {{ processo?: string, situacao?: string, erro?: string }} contexto reservado para ancoragem futura
+ * @returns {boolean} true se alterou algum campo
+ */
+function iaSanearLinguagemGenericaContrato_(contract, contexto) {
+  void contexto;
+  if (!contract || typeof contract !== 'object') return false;
+  return iaSanearLinguagemGenericaContratoWalk_(contract);
 }
 
 /** Frases genéricas fracas — casar por limite de palavra (evita falso positivo em texto operacional longo). */
@@ -3426,6 +3543,122 @@ function iaMotorSelfTestCriadorPopCriticoCasoReal103_() {
 }
 
 /**
+ * Self-test: saneamento determinístico de linguagem genérica no contrato IA antes do bloqueio.
+ * Executar no editor: iaMotorSelfTestContratoGenericoSaneamento_()
+ * @returns {{ ok: boolean, casos: Array<Object> }}
+ */
+function iaMotorSelfTestContratoGenericoSaneamento_() {
+  var sit = 'Cliente chega com dúvida';
+  var err = 'Atendente sugere produto sem entender a necessidade';
+  function baseCritico() {
+    return {
+      titulo: 'POP crítico teste linguagem genérica',
+      area: 'Atendimento e vendas',
+      processo: 'Atendimento',
+      linhaPop: 'critico',
+      versao_prompt: '1.0-selftest-gen',
+      execucao: {
+        o_que_fazer: [
+          'Perguntar no balcão qual é a dúvida principal do cliente antes de sugerir produto',
+          'Confirmar em voz alta a necessidade quando o cliente descrever o sintoma',
+          'Encaminhar ao farmacêutico quando o caso exceder orientação corrente de OTC',
+        ],
+        tempo: 'durante o atendimento',
+        frequencia: 'semanal',
+      },
+      controle: {
+        metrica:
+          'Percentagem de atendimentos sem sugestão precoce sem escuta (meta 90% verificada em auditoria de piso)',
+        criterio_sucesso: 'Em 9 de 10 avaliações, o colaborador ouve primeiro e só sugere após resumo do cliente',
+        erros_graves: [err],
+      },
+      contexto: { quando_aplicar: 'Quando no piso ocorre: ' + sit, exemplo: '' },
+      abordagem: {
+        tom: 'voz clara e ritmo calmo junto ao cliente no balcão',
+        postura: 'ombros alinhados à frente do cliente, sem cruzar braços',
+        o_que_dizer: ['Indique que vai confirmar a informação antes de sugerir qualquer produto'],
+      },
+    };
+  }
+  function bloqueiaGenerico(bloq) {
+    for (var i = 0; i < bloq.length; i++) {
+      if (String(bloq[i]).indexOf('linguagem genérica') >= 0) return true;
+    }
+    return false;
+  }
+  var casos = [];
+
+  // 1) criterio_sucesso com "executar corretamente"
+  var c1 = baseCritico();
+  c1.controle.criterio_sucesso = 'executar corretamente o atendimento';
+  var ctx1 = { processo: c1.processo, situacao: sit, erro: err };
+  var det1a = iaDetectarLinguagemGenericaDetalhada_(c1);
+  for (var r1 = 0; r1 < 6; r1++) {
+    if (!iaTemLinguagemGenerica_(c1)) break;
+    iaSanearLinguagemGenericaContrato_(c1, ctx1);
+  }
+  var bloq1 = validarContratoPopIaBloqueante_(c1, 'critico', sit, err);
+  var ok1 =
+    det1a.length > 0 &&
+    !bloqueiaGenerico(bloq1) &&
+    String(c1.controle.criterio_sucesso || '').indexOf('executar corretamente') < 0 &&
+    String(c1.controle.criterio_sucesso || '').indexOf('executar a etapa conferindo o dado necessário') >= 0;
+  casos.push({ id: 1, nome: 'criterio_sucesso executar corretamente', ok: ok1, bloq: bloq1, criterio: c1.controle.criterio_sucesso });
+
+  // 2) o_que_dizer com atender bem e ser cordial
+  var c2 = baseCritico();
+  c2.abordagem.o_que_dizer = ['atender bem e ser cordial'];
+  var det2a = iaDetectarLinguagemGenericaDetalhada_(c2);
+  for (var r2 = 0; r2 < 6; r2++) {
+    if (!iaTemLinguagemGenerica_(c2)) break;
+    iaSanearLinguagemGenericaContrato_(c2, ctx1);
+  }
+  var bloq2 = validarContratoPopIaBloqueante_(c2, 'critico', sit, err);
+  var d0 = String((c2.abordagem.o_que_dizer && c2.abordagem.o_que_dizer[0]) || '');
+  var ok2 =
+    det2a.length > 0 &&
+    !bloqueiaGenerico(bloq2) &&
+    d0.indexOf('atender bem') < 0 &&
+    d0.indexOf('ser cordial') < 0 &&
+    d0.indexOf('perguntar a necessidade') >= 0;
+  casos.push({ id: 2, nome: 'o_que_dizer atender bem e cordial', ok: ok2, bloq: bloq2, o_que_dizer0: d0 });
+
+  // 3) campo extra como_fazer_bem — não pode passar com frase original
+  var c3 = baseCritico();
+  c3.como_fazer_bem = 'agir com atenção';
+  for (var r3 = 0; r3 < 6; r3++) {
+    if (!iaTemLinguagemGenerica_(c3)) break;
+    iaSanearLinguagemGenericaContrato_(c3, ctx1);
+  }
+  var bloq3 = validarContratoPopIaBloqueante_(c3, 'critico', sit, err);
+  var s3 = String(c3.como_fazer_bem || '');
+  var ok3 =
+    !iaTemLinguagemGenerica_(c3) &&
+    s3.indexOf('agir com atenção') < 0 &&
+    s3.indexOf('agir com atencao') < 0 &&
+    s3.indexOf('olhar para o cliente') >= 0 &&
+    !bloqueiaGenerico(bloq3);
+  casos.push({ id: 3, nome: 'como_fazer_bem agir com atenção', ok: ok3, bloq: bloq3, como_fazer_bem: c3.como_fazer_bem });
+
+  // 4) demonstrar segurança — sem saneamento; deve bloquear e detector traz campo/termo
+  var c4 = baseCritico();
+  c4.controle.criterio_sucesso = 'demonstrar segurança no balcão sempre';
+  var det4 = iaDetectarLinguagemGenericaDetalhada_(c4);
+  for (var r4 = 0; r4 < 6; r4++) {
+    if (!iaTemLinguagemGenerica_(c4)) break;
+    iaSanearLinguagemGenericaContrato_(c4, ctx1);
+  }
+  var bloq4 = validarContratoPopIaBloqueante_(c4, 'critico', sit, err);
+  var ok4 = bloqueiaGenerico(bloq4) && det4.length > 0 && det4[0].campo && det4[0].termo;
+  casos.push({ id: 4, nome: 'demonstrar segurança bloqueia', ok: ok4, bloq: bloq4, primeiroDet: det4[0] || null });
+
+  var allOk = casos.every(function (x) {
+    return x.ok;
+  });
+  return { ok: allOk, casos: casos };
+}
+
+/**
  * Gera POP estruturado via OpenAI, valida no servidor e devolve payload pronto para preencherFormularioComJson.
  * Requer OPENAI_API_KEY nas propriedades do script. requestId correlaciona logs (gpt_input, gpt_output, gpt_validacao_erro).
  */
@@ -3484,10 +3717,43 @@ function gerarPopIaConceito(token, processo, situacao, erro) {
     contract.linhaPop = linhaServ;
   }
 
+  var ctxSan = { processo: pIn, situacao: sIn, erro: eIn };
+  var sanTentou = false;
+  var mutacoesSan = 0;
+  for (var iSan = 0; iSan < 8; iSan++) {
+    if (!iaTemLinguagemGenerica_(contract)) break;
+    sanTentou = true;
+    var mudouSan = iaSanearLinguagemGenericaContrato_(contract, ctxSan);
+    if (mudouSan) mutacoesSan++;
+    if (!mudouSan) break;
+  }
+  var sanFalhou = sanTentou && iaTemLinguagemGenerica_(contract);
+
   var bloq = validarContratoPopIaBloqueante_(contract, linhaServ, sIn, eIn);
   if (bloq.length) {
+    var detGen = iaDetectarLinguagemGenericaDetalhada_(contract);
+    var logObjErro = {
+      requestId: requestId,
+      etapa: 'validarContratoPopIaBloqueante_',
+      sanTentou: sanTentou,
+      sanTentouTxt: sanTentou ? 'SIM' : 'NAO',
+      sanFalhou: sanFalhou,
+      sanFalhouTxt: sanFalhou ? 'SIM' : 'NAO',
+      mutacoesSan: mutacoesSan,
+      detalhesGenericos: detGen.slice(0, 12),
+      blocking: bloq,
+    };
     var m2 = bloq.join(' ');
-    logGptPopIaLinha_(ctx.user, requestId, 'gpt_validacao_erro', m2, contract);
+    if (detGen.length) {
+      m2 +=
+        ' | gen: ' +
+        JSON.stringify({
+          campo: detGen[0].campo,
+          termo: detGen[0].termo,
+          trecho: String(detGen[0].trecho || '').slice(0, 120),
+        });
+    }
+    logGptPopIaLinha_(ctx.user, requestId, 'gpt_validacao_erro', m2, logObjErro);
     return { ok: false, requestId: requestId, message: m2, blocking: bloq };
   }
 
