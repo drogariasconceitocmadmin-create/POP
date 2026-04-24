@@ -3852,12 +3852,34 @@ function calcularScoreExecucaoConceito_(itens, opcoes) {
     prioridade_gerencial: prioridade_gerencial,
     risco_operacional: risco_operacional,
     status_operacional: status_operacional,
-    gestao_corretiva: gestao_corretiva,
+    gestao_corretiva: gestaoCorretiva,
     piores_padroes: piores_padroes,
     padroes_resultado_nao: padroes_resultado_nao,
     padroes_criticos_reprovados: padroes_criticos_reprovados,
     padroes_basicos_pior_desempenho: padroes_basicos_pior_desempenho,
   };
+}
+
+/** Valida objeto de gestão corretiva (BLOCO 5 — estrutura mínima). */
+function scoreSelfTestGestaoCorretivaItemValido_(o) {
+  if (!o || typeof o !== 'object') return false;
+  var keys = [
+    'codigo',
+    'secao',
+    'dimensao',
+    'classificacao',
+    'padrao',
+    'gravidade',
+    'acao_corretiva_padrao',
+    'responsavel_correcao',
+    'prazo_correcao',
+    'status_correcao',
+    'data_reauditoria_prevista',
+  ];
+  for (var i = 0; i < keys.length; i++) {
+    if (!Object.prototype.hasOwnProperty.call(o, keys[i])) return false;
+  }
+  return true;
 }
 
 /**
@@ -3891,10 +3913,14 @@ function scoreSelfTestConceito_() {
     item('B1', 'Outra', 'D1', 'Básico', 'normal', 'Sim', ''),
     item('B2', 'Outra', 'D1', 'Básico', 'normal', 'Não', ''),
   ]);
-  var ok2 = r2.score_geral < 100 && !r2.falha_critica && !r2.alerta_vermelho;
-  casos.push({ id: 2, nome: 'um Não normal', ok: ok2, detalhe: { score: r2.score_geral, falha: r2.falha_critica } });
+  var ok2Gestao =
+    Array.isArray(r2.gestao_corretiva) &&
+    r2.gestao_corretiva.length === 1 &&
+    scoreSelfTestGestaoCorretivaItemValido_(r2.gestao_corretiva[0]);
+  var ok2 = r2.score_geral < 100 && !r2.falha_critica && !r2.alerta_vermelho && ok2Gestao;
+  casos.push({ id: 2, nome: 'um Não normal + gestão corretiva', ok: ok2, detalhe: { score: r2.score_geral, falha: r2.falha_critica, gestaoLen: (r2.gestao_corretiva || []).length } });
 
-  // 3) um Não crítico com score alto
+  // 3) Não com gravidade crítica (reprovação crítica) com score alto — excelência bloqueada
   var r3 = calcularScoreExecucaoConceito_([
     item('C0', 'Outra', 'D1', 'Crítico', 'critica', 'Sim', ''),
     item('C1', 'Outra', 'D1', 'Crítico', 'critica', 'Sim', ''),
@@ -3907,8 +3933,18 @@ function scoreSelfTestConceito_() {
     item('C8', 'Outra', 'D1', 'Crítico', 'critica', 'Sim', ''),
     item('C9', 'Outra', 'D1', 'Crítico', 'critica', 'Não', ''),
   ]);
-  var ok3 = r3.score_geral >= 90 && r3.falha_critica && r3.status_operacional !== 'excelência operacional';
-  casos.push({ id: 3, nome: 'Não crítico bloqueia excelência', ok: ok3, detalhe: { score: r3.score_geral, status: r3.status_operacional } });
+  var ok3Gestao =
+    Array.isArray(r3.gestao_corretiva) &&
+    r3.gestao_corretiva.length === 1 &&
+    scoreSelfTestGestaoCorretivaItemValido_(r3.gestao_corretiva[0]) &&
+    r3.gestao_corretiva[0].gravidade === 'critica';
+  var ok3 = r3.score_geral >= 90 && r3.falha_critica && r3.status_operacional !== 'excelência operacional' && ok3Gestao;
+  casos.push({
+    id: 3,
+    nome: 'Não com gravidade crítica bloqueia excelência',
+    ok: ok3,
+    detalhe: { score: r3.score_geral, status: r3.status_operacional },
+  });
 
   // 4) duas falhas críticas
   var r4 = calcularScoreExecucaoConceito_([
