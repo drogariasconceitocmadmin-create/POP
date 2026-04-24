@@ -1774,8 +1774,23 @@ function patchPopStatus_(popId, versaoId, status) {
 }
 
 function normalizeTipoPop_(v) {
-  var s = String(v || '').trim().toLowerCase();
-  if (s === 'critico' || s === 'crítico') return 'critico';
+  var s = String(v || '')
+    .trim()
+    .replace(/\uFEFF/g, '')
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '');
+  if (s === 'critico') return 'critico';
+  return 'colaborativo';
+}
+
+/** Tipo efetivo para QA do motor (linhaPop do contrato vence tipo ambíguo; lista crítica estruturada indica crítico). */
+function iaMotorTipoIncomingParaQa_(mergedIn, contract) {
+  var m = mergedIn || {};
+  var c = contract || {};
+  if (normalizeTipoPop_(c.linhaPop || c.linha_pop_ia) === 'critico') return 'critico';
+  if (normalizeTipoPop_(m.tipo) === 'critico') return 'critico';
+  if (isCriticoProcedimentoItems_(m.procedimento)) return 'critico';
   return 'colaborativo';
 }
 
@@ -2556,12 +2571,13 @@ function iaMotorQaChecklistIncoming_(mergedIn, contract) {
   var c = contract || {};
   var exec = c.execucao || {};
   var ctl = c.controle || {};
+  var tipoQa = iaMotorTipoIncomingParaQa_(m, c);
 
   var ph0 = iaMotorQaPlaceholdersIncoming_(m);
   for (var ph = 0; ph < ph0.length; ph++) falhas.push(ph0[ph]);
 
   // ação observável (heurística leve)
-  if (normalizeTipoPop_(m.tipo) === 'colaborativo') {
+  if (tipoQa === 'colaborativo') {
     var steps = Array.isArray(m.procedimento) ? m.procedimento : [];
     var okSteps = 0;
     for (var i = 0; i < steps.length; i++) {
@@ -2594,23 +2610,25 @@ function iaMotorQaChecklistIncoming_(mergedIn, contract) {
   if (String(m.treinamento || '').trim() && popTreinamentoFracoPublicacao_(m.treinamento)) {
     falhas.push({ codigo: 'treinamento_fraco', mensagem: 'Treinamento vago ou sem 2 ações práticas observáveis.' });
   }
-  if (popObjetivoContaminadoBriefingIa_(m.titulo, m.objetivo)) {
+  if (tipoQa === 'colaborativo' && popObjetivoContaminadoBriefingIa_(m.titulo, m.objetivo)) {
     falhas.push({
       codigo: 'objetivo_briefing',
       mensagem: 'Objetivo contaminado pelo briefing (falta parágrafo de resultado antes do contexto).',
     });
   }
-  if (!Array.isArray(m.checklist_lider) || m.checklist_lider.length < 3) {
-    falhas.push({ codigo: 'checklist_lider_min', mensagem: 'Checklist do líder precisa de pelo menos 3 itens.' });
-  }
-  if (!Array.isArray(m.pontos_criticos) || m.pontos_criticos.length < 3) {
-    falhas.push({ codigo: 'pontos_criticos_min', mensagem: 'Pontos críticos precisam de pelo menos 3 itens.' });
-  }
-  if (!Array.isArray(m.pontosDeAtencao) || m.pontosDeAtencao.length < 3) {
-    falhas.push({ codigo: 'pontos_atencao_min', mensagem: 'Pontos de atenção precisam de pelo menos 3 itens.' });
-  }
-  if (!Array.isArray(m.desvios) || m.desvios.length < 3) {
-    falhas.push({ codigo: 'desvios_min', mensagem: 'Desvios precisam de pelo menos 3 cenários.' });
+  if (tipoQa === 'colaborativo') {
+    if (!Array.isArray(m.checklist_lider) || m.checklist_lider.length < 3) {
+      falhas.push({ codigo: 'checklist_lider_min', mensagem: 'Checklist do líder precisa de pelo menos 3 itens.' });
+    }
+    if (!Array.isArray(m.pontos_criticos) || m.pontos_criticos.length < 3) {
+      falhas.push({ codigo: 'pontos_criticos_min', mensagem: 'Pontos críticos precisam de pelo menos 3 itens.' });
+    }
+    if (!Array.isArray(m.pontosDeAtencao) || m.pontosDeAtencao.length < 3) {
+      falhas.push({ codigo: 'pontos_atencao_min', mensagem: 'Pontos de atenção precisam de pelo menos 3 itens.' });
+    }
+    if (!Array.isArray(m.desvios) || m.desvios.length < 3) {
+      falhas.push({ codigo: 'desvios_min', mensagem: 'Desvios precisam de pelo menos 3 cenários.' });
+    }
   }
 
   var critBlob = iaBagNorm_(String(ctl.criterio_sucesso || '') + ' ' + String(m.metrica || ''));
@@ -3223,6 +3241,92 @@ function iaMotorSelfTestCriadorPopDezCenarios_() {
     });
   }
   return { ok: allOk, cenarios: out };
+}
+
+/**
+ * Self-test: linha crítica (linhaPop / tipo) não deve sofrer mínimos de checklist/pontos/desvios do colaborativo.
+ * Executar no editor: iaMotorSelfTestCriadorPopCriticoQaLinhaPopVariants_()
+ * @returns {{ ok: boolean, variantesOk: boolean, procedimentoRuimDetectado: boolean, detalhes: Array }}
+ */
+function iaMotorSelfTestCriadorPopCriticoQaLinhaPopVariants_() {
+  var userStub = { id: 'selftest-ia-crit', perfil: 'diretor', nome: 'Teste motor', email: 'selftest@local', usuario: 'selftest' };
+  var sit = 'Cliente chega com dúvida';
+  var err = 'Atendente sugere produto sem entender a necessidade';
+  function buildContract(linhaPopVal) {
+    return {
+      titulo: 'POP crítico teste QA motor',
+      area: 'Atendimento e vendas',
+      processo: 'Atendimento',
+      linhaPop: linhaPopVal,
+      versao_prompt: '1.0-selftest',
+      execucao: {
+        o_que_fazer: [
+          'Perguntar no balcão qual é a dúvida principal do cliente antes de sugerir produto',
+          'Confirmar em voz alta a necessidade quando o cliente descrever o sintoma',
+          'Encaminhar ao farmacêutico quando o caso exceder orientação corrente de OTC',
+        ],
+        tempo: 'durante o atendimento',
+        frequencia: 'semanal',
+      },
+      controle: {
+        metrica:
+          'Percentagem de atendimentos sem sugestão precoce sem escuta (meta 90% verificada em auditoria de piso)',
+        criterio_sucesso:
+          'Em 9 de 10 avaliações, o colaborador ouve primeiro e só sugere após resumo do cliente',
+        erros_graves: [err],
+      },
+      contexto: { quando_aplicar: 'Quando no piso ocorre: ' + sit, exemplo: '' },
+      abordagem: {
+        tom: 'voz clara e ritmo calmo junto ao cliente no balcão',
+        postura: 'ombros alinhados à frente do cliente, sem cruzar braços',
+        o_que_dizer: ['Indique que vai confirmar a informação antes de sugerir qualquer produto'],
+      },
+    };
+  }
+  var mustNot = ['checklist_lider_min', 'pontos_criticos_min', 'pontos_atencao_min', 'desvios_min'];
+  var variants = ['critico', 'CRITICO', 'CrItico', 'crítico'];
+  var detalhes = [];
+  var variantesOk = true;
+  for (var i = 0; i < variants.length; i++) {
+    var c = buildContract(variants[i]);
+    var bloq = validarContratoPopIaBloqueante_(c, 'critico', sit, err);
+    if (bloq.length) {
+      variantesOk = false;
+      detalhes.push({ linhaPop: variants[i], fase: 'contrato', bloq: bloq });
+      continue;
+    }
+    var mergedIn = mapContratoIaConceitoToIncoming_(userStub, c, 'critico', sit, err);
+    iaMotorPreencherComoFazerErroCriticoIncoming_(mergedIn, c);
+    var falhas = iaMotorQaChecklistIncoming_(mergedIn, c);
+    var codes = falhas.map(function (x) {
+      return x.codigo;
+    });
+    for (var j = 0; j < mustNot.length; j++) {
+      if (codes.indexOf(mustNot[j]) >= 0) {
+        variantesOk = false;
+        detalhes.push({ linhaPop: variants[i], fase: 'qa_min_colab', falhas: falhas });
+        break;
+      }
+    }
+  }
+  var cBad = buildContract('critico');
+  cBad.execucao.o_que_fazer = [
+    'Etiqueta com preço ilegível na prateleira de OTC',
+    'Caixa fora do alinhamento padrão no corredor',
+    'Sinalização mínima ausente na entrada do corredor',
+  ];
+  var bloqB = validarContratoPopIaBloqueante_(cBad, 'critico', sit, err);
+  var procedimentoRuimDetectado = false;
+  if (!bloqB.length) {
+    var mB = mapContratoIaConceitoToIncoming_(userStub, cBad, 'critico', sit, err);
+    iaMotorPreencherComoFazerErroCriticoIncoming_(mB, cBad);
+    var fB = iaMotorQaChecklistIncoming_(mB, cBad);
+    for (var k = 0; k < fB.length; k++) {
+      if (fB[k].codigo === 'acao_observavel') procedimentoRuimDetectado = true;
+    }
+  }
+  var ok = variantesOk && procedimentoRuimDetectado;
+  return { ok: ok, variantesOk: variantesOk, procedimentoRuimDetectado: procedimentoRuimDetectado, detalhes: detalhes };
 }
 
 /**
