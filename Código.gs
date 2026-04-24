@@ -2411,7 +2411,7 @@ function iaMotorContagemTokens_(texto) {
 function iaMotorTemVerboAcao_(texto) {
   var s = iaBagNorm_(texto || '');
   if (!s) return false;
-  return /\b(falar|dizer|perguntar|responder|explicar|ouvir|olhar|encarar|manter|segurar|apoiar|virar|deixar|levantar|abaixar|apontar|girar|andar|parar|aproximar|afastar|bater|cumprimentar|acenar|esperar|chamar|confirmar|validar|verificar|conferir|checar|ler|mostrar|entregar|abrir|fechar|ligar|desligar|anotar|registar|registrar|escrever|assinar|marcar|indicar|apresentar|repetir|separar|pesar|medir|rotular|etiquetar|armazenar|guardar|limpar|higienizar|desinfetar|empacotar|orientar|avisar|informar|fazer|organizar|repor|recolocar|posicionar|alinhar|ignorar|ignora|omitir|omite|demorar|demora|interromper|interrompe|opinar|opina|prometer|promete|sugerir|sugere|confundir|confunde|esquecer|esquece|bloquear|bloqueia|devolver|devolve|misturar|mistura)\b/.test(
+  return /\b(falar|dizer|perguntar|pergunta|perguntou|responder|explicar|ouvir|olhar|encarar|manter|segurar|apoiar|virar|deixar|levantar|abaixar|apontar|girar|andar|parar|aproximar|afastar|bater|cumprimentar|acenar|esperar|chamar|confirmar|validar|verificar|conferir|checar|ler|mostrar|entregar|abrir|fechar|ligar|desligar|anotar|registar|registrar|escrever|assinar|marcar|indicar|apresentar|repetir|separar|pesar|medir|rotular|etiquetar|armazenar|guardar|limpar|higienizar|desinfetar|empacotar|orientar|avisar|informar|fazer|organizar|repor|recolocar|posicionar|alinhar|ignorar|ignora|omitir|omite|demorar|demora|interromper|interrompe|opinar|opina|prometer|promete|sugerir|sugere|confundir|confunde|esquecer|esquece|bloquear|bloqueia|devolver|devolve|misturar|mistura|saudar|sauda|saudou|escutar|escuta|escutou|buscar|busca|buscou|encaminhar|encaminha|encaminhou|acompanhar|acompanha|acompanhou|finalizar|finaliza|finalizou|retirar|retira|retirou)\b/.test(
     s
   );
 }
@@ -3327,6 +3327,102 @@ function iaMotorSelfTestCriadorPopCriticoQaLinhaPopVariants_() {
   }
   var ok = variantesOk && procedimentoRuimDetectado;
   return { ok: ok, variantesOk: variantesOk, procedimentoRuimDetectado: procedimentoRuimDetectado, detalhes: detalhes };
+}
+
+/**
+ * Smoke @103: linha crítica com saudar/escutar/buscar e métrica "número … por mês".
+ * Executar no editor: iaMotorSelfTestCriadorPopCriticoCasoReal103_()
+ * @returns {{ ok: boolean, metricaOk: boolean, acaoOk: boolean, metricaVagaBloqueia: boolean, acaoRuimBloqueia: boolean, bloq?: Array }}
+ */
+function iaMotorSelfTestCriadorPopCriticoCasoReal103_() {
+  var userStub = { id: 'selftest-103', perfil: 'diretor', nome: 'Teste motor', email: 'selftest@local', usuario: 'selftest' };
+  var sit = 'Cliente chega com dúvida';
+  var err = 'Atendente sugere produto sem entender a necessidade';
+  var c = {
+    titulo: 'POP crítico dúvida sem escuta (smoke 103)',
+    area: 'Atendimento e vendas',
+    processo: 'Atendimento',
+    linhaPop: 'critico',
+    versao_prompt: '1.0-selftest',
+    execucao: {
+      o_que_fazer: [
+        'Saudar o cliente no balcão e perguntar qual é a dúvida antes de sugerir produto',
+        'Escutar até o fim a descrição do cliente sem interromper no balcão',
+        'Buscar o farmacêutico quando a orientação exceder OTC corrente na farmácia',
+      ],
+      tempo: 'durante o atendimento',
+      frequencia: 'semanal',
+    },
+    controle: {
+      metrica: 'Número de atendimentos com erro por mês',
+      criterio_sucesso: 'Em 9 de 10 auditorias no balcão não ocorre sugestão sem escuta prévia',
+      erros_graves: [err],
+    },
+    contexto: { quando_aplicar: 'Quando no piso ocorre: ' + sit, exemplo: '' },
+    abordagem: {
+      tom: 'voz clara e ritmo calmo junto ao cliente no balcão',
+      postura: 'ombros alinhados à frente do cliente, sem cruzar braços',
+      o_que_dizer: ['Indique que vai confirmar a informação antes de sugerir qualquer produto'],
+    },
+  };
+  var bloq = validarContratoPopIaBloqueante_(c, 'critico', sit, err);
+  if (bloq.length) {
+    return {
+      ok: false,
+      metricaOk: false,
+      acaoOk: false,
+      metricaVagaBloqueia: false,
+      acaoRuimBloqueia: false,
+      bloq: bloq,
+    };
+  }
+  var mergedIn = mapContratoIaConceitoToIncoming_(userStub, c, 'critico', sit, err);
+  iaMotorPreencherComoFazerErroCriticoIncoming_(mergedIn, c);
+  var falhas = iaMotorQaChecklistIncoming_(mergedIn, c);
+  var codes = falhas.map(function (x) {
+    return x.codigo;
+  });
+  var metricaOk = codes.indexOf('metrica_fraca') < 0;
+  var acaoOk = codes.indexOf('acao_observavel') < 0;
+
+  var cVaga = JSON.parse(JSON.stringify(c));
+  cVaga.controle.metrica = 'atendimento correto no balcão com qualidade extra para teste de bloqueio mínimo';
+  var metricaVagaBloqueia = false;
+  var bloqV = validarContratoPopIaBloqueante_(cVaga, 'critico', sit, err);
+  if (!bloqV.length) {
+    var mV = mapContratoIaConceitoToIncoming_(userStub, cVaga, 'critico', sit, err);
+    iaMotorPreencherComoFazerErroCriticoIncoming_(mV, cVaga);
+    var fV = iaMotorQaChecklistIncoming_(mV, cVaga);
+    for (var i = 0; i < fV.length; i++) {
+      if (fV[i].codigo === 'metrica_fraca') metricaVagaBloqueia = true;
+    }
+  }
+
+  var cRuim = JSON.parse(JSON.stringify(c));
+  cRuim.execucao.o_que_fazer = [
+    'Silêncio prolongado diante do cliente no balcão',
+    'Etiqueta ilegível na prateleira de OTC',
+    'Corredor sem sinalização mínima detectável',
+  ];
+  var acaoRuimBloqueia = false;
+  var bloqR = validarContratoPopIaBloqueante_(cRuim, 'critico', sit, err);
+  if (!bloqR.length) {
+    var mR = mapContratoIaConceitoToIncoming_(userStub, cRuim, 'critico', sit, err);
+    iaMotorPreencherComoFazerErroCriticoIncoming_(mR, cRuim);
+    var fR = iaMotorQaChecklistIncoming_(mR, cRuim);
+    for (var j = 0; j < fR.length; j++) {
+      if (fR[j].codigo === 'acao_observavel') acaoRuimBloqueia = true;
+    }
+  }
+
+  var ok = metricaOk && acaoOk && metricaVagaBloqueia && acaoRuimBloqueia;
+  return {
+    ok: ok,
+    metricaOk: metricaOk,
+    acaoOk: acaoOk,
+    metricaVagaBloqueia: metricaVagaBloqueia,
+    acaoRuimBloqueia: acaoRuimBloqueia,
+  };
 }
 
 /**
@@ -4515,6 +4611,7 @@ function popMetricaFracaPublicacao_(raw) {
     'execucao adequada',
     'processo realizado corretamente',
     'atendimento adequado',
+    'atendimento bom',
     'qualidade adequada',
     'desempenho adequado',
     'execucao correta',
@@ -4522,6 +4619,17 @@ function popMetricaFracaPublicacao_(raw) {
   for (var i = 0; i < ban.length; i++) {
     if (s.indexOf(ban[i]) >= 0) return 'metrica vaga';
   }
+  var temCont =
+    /\b(numero|quantidade|total|contagem|qtd)\b/.test(s) ||
+    /\bquantidade\s+de\b/.test(s) ||
+    /\btotal\s+de\b/.test(s) ||
+    /\bcontagem\s+de\b/.test(s);
+  var temPeriodo =
+    /\bpor\s+(dia|turno|semana|mes|hora|atendimento)\b/.test(s) ||
+    /\b(diario|diário|semanal|mensal|mensais|no\s+turno|por\s+mes|por\s+dia|por\s+semana|por\s+turno)\b/.test(s);
+  var temObjMens =
+    /\b(atendimentos|atendimento|clientes|cliente|pedidos|pedido|falhas|falha|conformidades|nao\s+conformidades|erros|erro|incidentes|incidente|balcao|loja|casos|caso|dispensacoes|dispensacao)\b/.test(s);
+  if (temCont && temPeriodo && temObjMens && t.length >= POP_PUBLISH_MIN_METRICA_LEN_) return '';
   if (t.length < POP_PUBLISH_MIN_METRICA_LEN_) return 'metrica insuficiente';
   var mens =
     /\b(%|percentagem|porcentagem|\d+)\b/.test(s) ||
