@@ -2494,6 +2494,9 @@ function iaMotorQaChecklistIncoming_(mergedIn, contract) {
   var exec = c.execucao || {};
   var ctl = c.controle || {};
 
+  var ph0 = iaMotorQaPlaceholdersIncoming_(m);
+  for (var ph = 0; ph < ph0.length; ph++) falhas.push(ph0[ph]);
+
   // ação observável (heurística leve)
   if (normalizeTipoPop_(m.tipo) === 'colaborativo') {
     var steps = Array.isArray(m.procedimento) ? m.procedimento : [];
@@ -2678,6 +2681,125 @@ function validarContratoPopIaBloqueante_(c, linhaPopServidor, situacao, erro) {
   return erros;
 }
 
+/**
+ * Completa campos operacionais do payload colaborativo quando a IA deixa vazio.
+ * Texto ancorado só em processo/situação/erro/título — sem inventar produtos ou sistemas externos.
+ * Chamado apenas em gerarPopIaConceito (não altera importação manual nem publicação direta).
+ */
+function iaMotorCompletarColaborativoGeracaoIa_(mergedIn, contract, pIn, sIn, eIn) {
+  if (normalizeTipoPop_(mergedIn.tipo) !== 'colaborativo') return mergedIn;
+  var proc = normalizeText_(pIn || mergedIn.processo || '');
+  var sit = normalizeText_(sIn || '');
+
+  function vazio(s) {
+    return !String(s == null ? '' : s).trim();
+  }
+
+  if (vazio(mergedIn.escopo)) {
+    mergedIn.escopo =
+      'Aplica-se ao processo "' +
+      proc +
+      '" na operação de loja (balcão e área de vendas), quando se verifica: ' +
+      sit +
+      '.';
+  }
+  if (!Array.isArray(mergedIn.responsaveis) || !mergedIn.responsaveis.length) {
+    mergedIn.responsaveis = ['Responsável de loja', 'Farmacêutico de plantão', 'Equipa de balcão envolvida no processo'];
+  }
+  if (vazio(mergedIn.regra_de_ouro)) {
+    mergedIn.regra_de_ouro =
+      'Segurança do cliente e do colaborador em primeiro lugar; em dúvida, confirmar no balcão antes de avançar.';
+  }
+  var chk = mergedIn.checklist;
+  if (!Array.isArray(chk) || chk.length < 5) {
+    mergedIn.checklist = [
+      'Cumprimentar o cliente e repetir em voz audível o pedido ou a dúvida no balcão',
+      'Abrir o procedimento interno de ' + proc + ' e apontar o passo que vai executar antes de orientar',
+      'Medir o tempo de espera percebido quando há fila e acenar quem chegou por último',
+      'Registar no sistema qualquer exceção ou reclamação ligada a: ' + sit.slice(0, 100),
+      'Quando houver risco clínico ou legal, chamar farmacêutico antes de decidir sozinho no balcão',
+    ];
+  }
+  var chL = mergedIn.checklist_lider;
+  if (!Array.isArray(chL) || !chL.length) {
+    mergedIn.checklist_lider = [
+      'Na abertura de turno, confirmar com a equipa se já leu o POP de ' + proc + ' desta semana',
+      'Em auditoria de piso, observar se os 3 primeiros passos do procedimento são visíveis no balcão',
+    ];
+  }
+  var desv = mergedIn.desvios;
+  if (!Array.isArray(desv) || !desv.length) {
+    mergedIn.desvios = [
+      'Interromper o cliente antes de ouvir o pedido completo no balcão',
+      'Responder de costas ou sem olhar para o cliente quando há fila',
+      'Seguir sem registo quando a situação exige rastreio interno',
+    ];
+  }
+  if (vazio(mergedIn.treinamento)) {
+    mergedIn.treinamento =
+      'Roteiro prático de 15 minutos no balcão: simulação com checklist impresso para o caso: ' + sit.slice(0, 100) + '.';
+  }
+  if (vazio(mergedIn.metrica) && contract && contract.controle) {
+    mergedIn.metrica = normalizeText_(contract.controle.metrica || '');
+  }
+  if (vazio(mergedIn.metrica)) {
+    mergedIn.metrica =
+      'Percentagem de atendimentos em ' +
+      proc +
+      ' sem repetir o mesmo incidente na semana (registo interno ou checklist do líder)';
+  }
+  if (!Array.isArray(mergedIn.pontos_criticos) || !mergedIn.pontos_criticos.length) {
+    mergedIn.pontos_criticos = [
+      'Tom: voz calma e ritmo pausado junto ao cliente no balcão',
+      'Postura: ombros abertos, frente ao cliente, sem cruzar braços',
+    ];
+  }
+  var pda = mergedIn.pontosDeAtencao;
+  if (!Array.isArray(pda) || !pda.length) {
+    mergedIn.pontosDeAtencao = [
+      'Fala / script: explicar ao cliente que vai confirmar a informação antes de concluir',
+      'Critério de sucesso: cliente repete em uma frase o que precisa e o colaborador confirma',
+    ];
+  }
+  return mergedIn;
+}
+
+/** QA motor: placeholders proibidos no payload colaborativo (complementa iaMotorQaChecklistIncoming_). */
+function iaMotorQaPlaceholdersIncoming_(m) {
+  var falhas = [];
+  if (normalizeTipoPop_(m.tipo) !== 'colaborativo') return falhas;
+  function chk(campo, val) {
+    var t = popTextoCampoPublicacao_(val);
+    if (!t) return;
+    if (popEsNaoInformadoLiteral_(t)) {
+      falhas.push({ codigo: 'placeholder_' + campo, mensagem: 'Texto proibido (placeholder) em ' + campo + '.' });
+    }
+  }
+  chk('objetivo', m.objetivo);
+  chk('escopo', m.escopo);
+  chk('regra_de_ouro', m.regra_de_ouro);
+  chk('frequencia', m.frequencia);
+  chk('metrica', m.metrica);
+  chk('treinamento', m.treinamento);
+  chk('como_fazer_bem', m.como_fazer_bem);
+  chk('erro_critico', m.erro_critico);
+  function chkArr(nome, arr) {
+    var list = normalizeStringArray_(arr || []);
+    for (var i = 0; i < list.length; i++) {
+      if (popEsNaoInformadoLiteral_(list[i])) {
+        falhas.push({ codigo: 'placeholder_' + nome, mensagem: 'Item placeholder em ' + nome + '.' });
+        return;
+      }
+    }
+  }
+  chkArr('responsaveis', m.responsaveis);
+  chkArr('pontos_criticos', m.pontos_criticos);
+  chkArr('checklist_lider', m.checklist_lider);
+  chkArr('checklist', m.checklist);
+  chkArr('desvios', m.desvios);
+  return falhas;
+}
+
 function mapContratoIaConceitoToIncoming_(user, c, linhaPopServidor, situacao, erro) {
   var tipoPop = linhaPopServidor === 'critico' ? 'critico' : 'colaborativo';
   var exec = c.execucao || {};
@@ -2794,6 +2916,175 @@ function logGptPopIaLinha_(user, requestId, acao, mensagem, payloadResumo) {
 }
 
 /**
+ * Self-test do criador (sem OpenAI): contrato mínimo + map + motor de completar + QA motor + persistência mínima + pré-visualização de publicação.
+ * Força linha colaborativa para exercitar o mesmo ramo de payload que o formulário usa após gerarPopIaConceito.
+ * @returns {{ ok: boolean, cenarios: Array<Object> }}
+ */
+function iaMotorSelfTestCriadorPopDezCenarios_() {
+  var userStub = { id: 'selftest-ia', perfil: 'diretor', nome: 'Teste motor', email: 'selftest@local', usuario: 'selftest' };
+  var cenarios = [
+    { id: 1, titulo: 'Atendimento inicial no balcão', proc: 'Atendimento', sit: 'Cliente acabou de chegar ao balcão', err: 'Colaborador ignora cumprimento ou demora a reagir' },
+    { id: 2, titulo: 'Cliente com dúvida', proc: 'Atendimento', sit: 'Cliente pergunta sobre posologia de OTC', err: 'Resposta genérica sem confirmar leitura da embalagem' },
+    { id: 3, titulo: 'Sugestão precoce de produto', proc: 'Vendas consultivas', sit: 'Cliente ainda não descreveu a necessidade', err: 'Oferta de produto antes de ouvir o motivo da visita' },
+    { id: 4, titulo: 'Encaminhamento ao farmacêutico', proc: 'Dispensação', sit: 'Cliente relata efeito adverso leve', err: 'Colaborador opina sobre tratamento sem farmacêutico' },
+    { id: 5, titulo: 'Produto em falta', proc: 'Atendimento', sit: 'SKU pedido não está na gôndola', err: 'Promessa de prazo sem verificar sistema ou stock' },
+    { id: 6, titulo: 'Reposição de prateleira', proc: 'Rotina operacional da loja', sit: 'Caixa de armazém chegou ao balcão', err: 'Mercadoria fica no corredor obstruindo passagem' },
+    { id: 7, titulo: 'Limpeza de prateleira', proc: 'Organização e limpeza', sit: 'Produto vencido ainda exposto', err: 'Retirada sem registo nem descarte conforme procedimento' },
+    { id: 8, titulo: 'Atendimento com fila', proc: 'Atendimento ao cliente', sit: 'Fila de mais de três pessoas no balcão', err: 'Atendimento sem reconhecer quem espera há mais tempo' },
+    { id: 9, titulo: 'Conferência no caixa', proc: 'Abertura/fechamento de caixa', sit: 'Fecho de caixa com diferença pequena', err: 'Seguir sem dupla contagem ou registo do responsável' },
+    { id: 10, titulo: 'Retirada ou entrega de pedido', proc: 'Separação e expedição', sit: 'Cliente retira encomenda no balcão', err: 'Entrega sem conferir identidade ou código do pedido' },
+  ];
+  function stubContrato(titulo, area, processo, sit, err) {
+    var steps = [
+      'Olhar o cliente nos olhos e ouvir o pedido completo no balcão',
+      'Confirmar em voz audível a regra do processo antes de orientar ou encaminhar',
+      'Registrar no sistema a decisão quando o procedimento exige rastreio',
+    ];
+    return {
+      titulo: titulo,
+      area: area,
+      processo: processo,
+      linhaPop: 'colaborativo',
+      versao_prompt: '1.0-selftest',
+      execucao: {
+        o_que_fazer: steps,
+        tempo: 'durante o turno de loja',
+        frequencia: 'sempre que ocorrer a situação descrita',
+      },
+      controle: {
+        metrica:
+          'Percentagem de atendimentos em ' +
+          processo +
+          ' sem repetir o incidente na semana (checklist do líder ou registo interno)',
+        criterio_sucesso:
+          'Em pelo menos 9 de 10 observações no piso, o colaborador executa os 3 passos sem nova queixa igual no mesmo dia',
+        erros_graves: [String(err).slice(0, 220)],
+      },
+      contexto: {
+        quando_aplicar: 'Quando no piso ocorre: ' + String(sit).slice(0, 200),
+        exemplo: '',
+      },
+      abordagem: {
+        tom: 'voz clara e ritmo calmo junto ao cliente no balcão',
+        postura: 'ombros alinhados à frente do cliente, sem cruzar braços',
+        o_que_dizer: ['Indique que vai confirmar a informação antes de concluir o atendimento'],
+      },
+    };
+  }
+  var out = [];
+  var allOk = true;
+  for (var i = 0; i < cenarios.length; i++) {
+    var sc = cenarios[i];
+    var area = 'Atendimento e vendas';
+    if (sc.proc === 'Dispensação') area = 'Medicamentos e controle farmacêutico';
+    else if (sc.proc === 'Rotina operacional da loja' || sc.proc === 'Organização e limpeza') area = 'Loja e operação diária';
+    else if (sc.proc === 'Abertura/fechamento de caixa') area = 'Caixa e financeiro operacional';
+    else if (sc.proc === 'Separação e expedição') area = 'Delivery e expedição';
+
+    var c = stubContrato(sc.titulo, area, sc.proc, sc.sit, sc.err);
+    var bloq = validarContratoPopIaBloqueante_(c, 'colaborativo', sc.sit, sc.err);
+    var gerouOk = !bloq.length;
+    if (!gerouOk) {
+      allOk = false;
+      out.push({
+        id: sc.id,
+        titulo: sc.titulo,
+        gerouSemErro: 'NAO',
+        veioCompleto: 'NAO',
+        modoExecucaoClaro: 'NAO',
+        portalMinimoSemantico: 'NAO',
+        publicacaoBloqueada: 'NAO',
+        motivoBloqueioPublicacao: '',
+        contratoBloqueante: bloq,
+        falhasQaMotor: [],
+      });
+      continue;
+    }
+
+    var mergedIn = null;
+    var qaFalhas = [];
+    var portalOk = false;
+    var pubErros = [];
+    var completo = false;
+    var execClaro = false;
+    var gerouOk = true;
+    try {
+      mergedIn = mapContratoIaConceitoToIncoming_(userStub, c, 'colaborativo', sc.sit, sc.err);
+      iaMotorCompletarColaborativoGeracaoIa_(mergedIn, c, sc.proc, sc.sit, sc.err);
+      iaMotorPreencherComoFazerErroCriticoIncoming_(mergedIn, c);
+      qaFalhas = iaMotorQaChecklistIncoming_(mergedIn, c);
+      var blk = validateColaborativoGptBlocking_(mergedIn);
+      completo =
+        !qaFalhas.length &&
+        !blk.length &&
+        !!String(mergedIn.objetivo || '').trim() &&
+        !!String(mergedIn.escopo || '').trim() &&
+        Array.isArray(mergedIn.responsaveis) &&
+        mergedIn.responsaveis.length &&
+        !!String(mergedIn.regra_de_ouro || '').trim() &&
+        !!String(mergedIn.frequencia || '').trim() &&
+        Array.isArray(mergedIn.procedimento) &&
+        countProcedimentoEtapasValidas_(mergedIn.procedimento) >= 3 &&
+        Array.isArray(mergedIn.pontos_criticos) &&
+        mergedIn.pontos_criticos.length &&
+        Array.isArray(mergedIn.checklist_lider) &&
+        mergedIn.checklist_lider.length &&
+        Array.isArray(mergedIn.checklist) &&
+        mergedIn.checklist.length >= 5 &&
+        Array.isArray(mergedIn.desvios) &&
+        mergedIn.desvios.length &&
+        !!String(mergedIn.metrica || '').trim() &&
+        !!String(mergedIn.treinamento || '').trim() &&
+        !!String(mergedIn.como_fazer_bem || '').trim() &&
+        !!String(mergedIn.erro_critico || '').trim();
+      var steps = mergedIn.procedimento || [];
+      var vOk = 0;
+      for (var j = 0; j < steps.length; j++) {
+        if (iaMotorTemVerboAcao_(String(steps[j] || ''))) vOk++;
+      }
+      execClaro = vOk >= 2;
+      var normalized = normalizePopJsonPayload_(userStub, mergedIn);
+      try {
+        assertPortalPopMinimoSemanticoPersistencia_(normalized);
+        portalOk = true;
+      } catch (eP) {
+        portalOk = false;
+      }
+      if (portalOk && completo) {
+        var basePop = popFixtureColaborativoPublicacaoMinimoTeste_();
+        var pop = JSON.parse(JSON.stringify(basePop));
+        pop.titulo = normalized.titulo || pop.titulo;
+        pop.area = normalized.area || pop.area;
+        pop.processo = normalized.processo || pop.processo;
+        pop.conteudoObj = merge_(JSON.parse(JSON.stringify(basePop.conteudoObj)), normalized.conteudoJson || {});
+        popAplicarNormalizaveisPublicacao_(pop);
+        pubErros = popValidacaoConteudoBloqueantePublicacao_(pop);
+      }
+    } catch (e1) {
+      gerouOk = false;
+      allOk = false;
+      qaFalhas = [{ mensagem: String(e1 && e1.message ? e1.message : e1) }];
+    }
+    if (!completo || !portalOk) allOk = false;
+    out.push({
+      id: sc.id,
+      titulo: sc.titulo,
+      gerouSemErro: gerouOk ? 'SIM' : 'NAO',
+      veioCompleto: completo ? 'SIM' : 'NAO',
+      modoExecucaoClaro: execClaro ? 'SIM' : 'NAO',
+      portalMinimoSemantico: portalOk ? 'SIM' : 'NAO',
+      publicacaoBloqueada: pubErros && pubErros.length ? 'SIM' : 'NAO',
+      motivoBloqueioPublicacao: pubErros && pubErros.length ? pubErros.join(' · ') : '',
+      contratoBloqueante: bloq,
+      falhasQaMotor: (qaFalhas || []).map(function (x) {
+        return x.mensagem;
+      }),
+    });
+  }
+  return { ok: allOk, cenarios: out };
+}
+
+/**
  * Gera POP estruturado via OpenAI, valida no servidor e devolve payload pronto para preencherFormularioComJson.
  * Requer OPENAI_API_KEY nas propriedades do script. requestId correlaciona logs (gpt_input, gpt_output, gpt_validacao_erro).
  */
@@ -2862,6 +3153,7 @@ function gerarPopIaConceito(token, processo, situacao, erro) {
   var mergedIn;
   try {
     mergedIn = mapContratoIaConceitoToIncoming_(ctx.user, contract, linhaServ, sIn, eIn);
+    iaMotorCompletarColaborativoGeracaoIa_(mergedIn, contract, pIn, sIn, eIn);
     assertTipoPopPermitido_(ctx.user, mergedIn.tipo);
     // Pré-preenche campos de QA no payload (sem exigir mudança no contrato IA).
     iaMotorPreencherComoFazerErroCriticoIncoming_(mergedIn, contract);
