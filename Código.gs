@@ -3905,7 +3905,17 @@ function scoreSelfTestConceito_() {
     item('A1', 'Outra', 'D1', 'Básico', 'normal', 'Sim', ''),
     item('A2', 'Outra', 'D1', 'Básico', 'normal', 'Sim', ''),
   ]);
-  var ok1 = r1.score_geral === 100 && r1.status_operacional === 'excelência operacional' && !r1.falha_critica && !r1.alerta_vermelho;
+  var ok1Gestao =
+    r1.gestao_corretiva != null &&
+    Array.isArray(r1.gestao_corretiva) &&
+    r1.gestao_corretiva.length === 0 &&
+    r1.gestao_corretiva.length === r1.total_nao;
+  var ok1 =
+    r1.score_geral === 100 &&
+    r1.status_operacional === 'excelência operacional' &&
+    !r1.falha_critica &&
+    !r1.alerta_vermelho &&
+    ok1Gestao;
   casos.push({ id: 1, nome: 'score perfeito', ok: ok1, detalhe: { score: r1.score_geral, status: r1.status_operacional } });
 
   // 2) um Não normal
@@ -3914,8 +3924,10 @@ function scoreSelfTestConceito_() {
     item('B2', 'Outra', 'D1', 'Básico', 'normal', 'Não', ''),
   ]);
   var ok2Gestao =
+    r2.gestao_corretiva != null &&
     Array.isArray(r2.gestao_corretiva) &&
-    r2.gestao_corretiva.length === 1 &&
+    r2.gestao_corretiva.length === r2.total_nao &&
+    r2.total_nao === 1 &&
     scoreSelfTestGestaoCorretivaItemValido_(r2.gestao_corretiva[0]);
   var ok2 = r2.score_geral < 100 && !r2.falha_critica && !r2.alerta_vermelho && ok2Gestao;
   casos.push({ id: 2, nome: 'um Não normal + gestão corretiva', ok: ok2, detalhe: { score: r2.score_geral, falha: r2.falha_critica, gestaoLen: (r2.gestao_corretiva || []).length } });
@@ -3934,14 +3946,16 @@ function scoreSelfTestConceito_() {
     item('C9', 'Outra', 'D1', 'Crítico', 'critica', 'Não', ''),
   ]);
   var ok3Gestao =
+    r3.gestao_corretiva != null &&
     Array.isArray(r3.gestao_corretiva) &&
-    r3.gestao_corretiva.length === 1 &&
+    r3.gestao_corretiva.length === r3.total_nao &&
+    r3.total_nao === 1 &&
     scoreSelfTestGestaoCorretivaItemValido_(r3.gestao_corretiva[0]) &&
     r3.gestao_corretiva[0].gravidade === 'critica';
   var ok3 = r3.score_geral >= 90 && r3.falha_critica && r3.status_operacional !== 'excelência operacional' && ok3Gestao;
   casos.push({
     id: 3,
-    nome: 'Não com gravidade crítica bloqueia excelência',
+    nome: 'Falha crítica com score >= 90 bloqueia excelência',
     ok: ok3,
     detalhe: { score: r3.score_geral, status: r3.status_operacional },
   });
@@ -3952,7 +3966,14 @@ function scoreSelfTestConceito_() {
     item('D2', 'Outra', 'D1', 'Crítico', 'critica', 'Não', ''),
     item('D3', 'Outra', 'D1', 'Crítico', 'critica', 'Sim', ''),
   ]);
-  var ok4 = r4.alerta_vermelho && r4.total_falhas_criticas >= 2;
+  var ok4Gestao =
+    r4.gestao_corretiva != null &&
+    Array.isArray(r4.gestao_corretiva) &&
+    r4.gestao_corretiva.length === r4.total_nao &&
+    r4.total_nao === 2 &&
+    scoreSelfTestGestaoCorretivaItemValido_(r4.gestao_corretiva[0]) &&
+    scoreSelfTestGestaoCorretivaItemValido_(r4.gestao_corretiva[1]);
+  var ok4 = r4.alerta_vermelho && r4.total_falhas_criticas >= 2 && ok4Gestao;
   casos.push({ id: 4, nome: 'duas falhas críticas', ok: ok4, detalhe: { alerta: r4.alerta_vermelho } });
 
   // 5) N/A fora
@@ -3961,7 +3982,13 @@ function scoreSelfTestConceito_() {
     item('E2', 'Outra', 'D1', 'Básico', 'normal', 'N/A', ''),
     item('E3', 'Outra', 'D1', 'Básico', 'normal', 'Não', ''),
   ]);
-  var ok5 = r5.total_aplicaveis === 2 && r5.total_na === 1 && r5.score_geral === 50;
+  var ok5Gestao =
+    r5.gestao_corretiva != null &&
+    Array.isArray(r5.gestao_corretiva) &&
+    r5.gestao_corretiva.length === r5.total_nao &&
+    r5.total_nao === 1 &&
+    scoreSelfTestGestaoCorretivaItemValido_(r5.gestao_corretiva[0]);
+  var ok5 = r5.total_aplicaveis === 2 && r5.total_na === 1 && r5.score_geral === 50 && ok5Gestao;
   casos.push({ id: 5, nome: 'N/A fora do denominador', ok: ok5, detalhe: { aplicaveis: r5.total_aplicaveis, na: r5.total_na, score: r5.score_geral } });
 
   // 6) seção crítica < 80 e >= 70 (75%)
