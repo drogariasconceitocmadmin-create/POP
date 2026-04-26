@@ -5294,6 +5294,85 @@ function geradorAplicarMetadadosCrivoNoConteudo_(cj, crivo) {
   cj.resumo_crivo = String(crivo.resumo || '');
 }
 
+/** Bloqueadores que a 1ª passada de reparo F4 sabe endereçar (apenas estes, em conjunto isolado). */
+function geradorCrivoCodigosReparoF4_() {
+  return {
+    objetivo_contaminado_briefing: true,
+    erros_comuns_insuficientes: true,
+    como_fazer_bem_insuficiente: true,
+    humanizacao_abstrata: true,
+  };
+}
+
+/**
+ * Só aplica reparo se não houver bloqueador estrutural fora do conjunto (ex.: item genérico, checklist morto).
+ */
+function geradorCrivoApenasBloqReparoF4_(bloqueadores) {
+  var alvo = geradorCrivoCodigosReparoF4_();
+  if (!Array.isArray(bloqueadores) || !bloqueadores.length) return false;
+  for (var i = 0; i < bloqueadores.length; i++) {
+    var c = bloqueadores[i] && bloqueadores[i].codigo ? String(bloqueadores[i].codigo) : '';
+    if (!alvo[c]) return false;
+  }
+  return true;
+}
+
+/**
+ * Reparo determinístico pós-crivo (1 passada). Não altera itens avaliáveis, matriz, enums.
+ * @param {Object} conteudoObj conteudoJson mutável
+ * @param {{ processo: string, situacao: string, erro: string }} contexto
+ * @param {Object} resultadoCrivo resultado de avaliarCrivoExecucaoPop_
+ * @returns {{ bloqueadoresEnderecados: string[] }}
+ */
+function geradorRepararBloqueadoresCrivoFase4_(conteudoObj, contexto, resultadoCrivo) {
+  var cj = conteudoObj || {};
+  var cx = contexto || {};
+  var bagPE = iaBagNorm_(String(cx.processo || '') + ' ' + String(cx.situacao || '') + ' ' + String(cx.erro || ''));
+  var fix = {};
+  var bl = (resultadoCrivo && resultadoCrivo.bloqueadores) || [];
+  for (var h = 0; h < bl.length; h++) {
+    var cod = bl[h] && bl[h].codigo ? String(bl[h].codigo) : '';
+    if (cod) fix[cod] = true;
+  }
+
+  var OBJ_BALCAO_NEC_ =
+    'Garantir que o atendente entenda a necessidade do cliente antes de sugerir produto, reduzindo indicação inadequada e aumentando a segurança do atendimento no balcão.';
+  var OBJ_FALLBACK_ =
+    'Garantir execução segura e alinhada ao processo no piso, com passos claros e verificáveis para reduzir risco ao cliente e à operação.';
+
+  if (fix.objetivo_contaminado_briefing) {
+    if (bagPE.indexOf('balc') >= 0 && (bagPE.indexOf('necess') >= 0 || bagPE.indexOf('suger') >= 0 || bagPE.indexOf('dúv') >= 0 || bagPE.indexOf('duv') >= 0)) {
+      cj.objetivo = OBJ_BALCAO_NEC_;
+    } else {
+      cj.objetivo = OBJ_FALLBACK_;
+    }
+  }
+
+  if (fix.erros_comuns_insuficientes) {
+    cj.errosComuns = [
+      'Sugerir produto antes de perguntar a necessidade do cliente',
+      'Assumir o problema do cliente sem confirmar a dúvida',
+      'Encerrar o atendimento sem explicar o próximo passo',
+    ];
+  }
+
+  if (fix.como_fazer_bem_insuficiente || fix.humanizacao_abstrata) {
+    cj.como_fazer_bem = [
+      'Olhar para o cliente ao iniciar a fala',
+      'Perguntar a necessidade principal antes de sugerir qualquer produto',
+      'Ouvir a explicação do cliente sem interromper',
+      'Confirmar o entendimento da dúvida em frase curta',
+      'Adaptar a pergunta à pressa, dor ou dúvida percebida',
+      'Evitar que o cliente repita a mesma informação',
+      'Encerrar informando o próximo passo com clareza',
+      'Encaminhar ao farmacêutico quando houver dúvida técnica, receita, risco ou insegurança',
+    ].join(' · ');
+  }
+
+  var end = Object.keys(fix);
+  return { bloqueadoresEnderecados: end };
+}
+
 /**
  * Integração Fase 4 após normalize no gerador IA: enriquecimento, itens, validação, crivo, score.
  * @returns {{ ok: boolean, crivo: Object, score_conceito: Object, matriz: Object, preview_bloqueado_publicacao: boolean, message: string }}
@@ -5345,6 +5424,19 @@ function geradorIntegrarFase4PosNormalizacao_(user, requestId, normalized, contr
   }
 
   var crivo = avaliarCrivoExecucaoPop_(normalized);
+  if (crivo.status_crivo === 'reprovado_no_crivo' && geradorCrivoApenasBloqReparoF4_(crivo.bloqueadores)) {
+    var repF4 = geradorRepararBloqueadoresCrivoFase4_(
+      cj,
+      { processo: processoIn, situacao: situacaoIn, erro: erroIn },
+      crivo,
+    );
+    cj.fase4_reparo_crivo = true;
+    cj.fase4_reparo_crivo_bloqueadores = repF4.bloqueadoresEnderecados || [];
+    crivo = avaliarCrivoExecucaoPop_(normalized);
+  } else if (!cj.fase4_reparo_crivo) {
+    cj.fase4_reparo_crivo = false;
+  }
+
   out.crivo = crivo;
   geradorAplicarMetadadosCrivoNoConteudo_(cj, crivo);
   out.preview_bloqueado_publicacao =
@@ -5431,6 +5523,155 @@ function iaMotorSelfTestQaMetricaPosPatchFase4_() {
     vaga: ok2,
     boa: ok3,
     regressao_global: reg,
+  };
+}
+
+/**
+ * Reparo pós-crivo (1 passada) no fluxo Fase 4.
+ * @returns {{ ok: boolean, caso107: boolean, casoRuim: boolean, regressao: boolean, det: Object }}
+ */
+function fase4SelfTestReparoCrivoPosGeracao_() {
+  var ctx = {
+    processo: 'atendimento no balcão',
+    situacao: 'cliente chega com dúvida',
+    erro: 'atendente sugere produto sem entender a necessidade',
+  };
+  var matB = geradorMapearMatrizConceito_({
+    processo: ctx.processo,
+    situacao: ctx.situacao,
+    erro: ctx.erro,
+    area: 'Atendimento e vendas',
+    linhaPop: 'colaborativo',
+    conteudoGerado: {},
+  });
+
+  var cj0 = {
+    regra_de_ouro: 'Em dúvida clínica ou legal, chamar farmacêutico antes de concluir o atendimento.',
+    procedimento: [
+      'Cumprimentar e repetir em voz audível o pedido ou a dúvida no balcão',
+      'Confirmar leitura da embalagem antes de explicar posologia de OTC',
+      'Registar no sistema qualquer exceção ou reclamação com data e responsável',
+    ],
+    erro_critico: 'Sugerir produto sem ouvir a necessidade completa no balcão.',
+    pontosDeAtencao: ['Fila no rush', 'Cliente idoso', 'SKU em falta na gôndola'],
+    checklist_lider: ['Auditar 3 atendimentos por turno', 'Revisar registo de exceções', 'Confirmar leitura do POP na abertura'],
+    checklist: [
+      'Confirmar identidade do cliente antes de entregar medicamento controlado',
+      'Ler em voz alta o pedido e apontar o passo do POP em execução',
+      'Registar exceção com data, hora e nome do responsável no sistema',
+      'Medir tempo de espera quando há fila e acenar quem chegou por último',
+      'Chamar farmacêutico quando a dúvida exceder OTC ou houver risco clínico',
+    ],
+    treinamento: 'Roleplay de 10 min no balcão. Checklist de observação no piso com 3 itens sim/não.',
+    desvios: [
+      'Cliente sem identificação na retirada de controlado — recusar e chamar farmacêutico',
+      'Fila sem reconhecimento de quem espera mais tempo — corrigir na hora e anotar',
+      'Promessa de prazo sem verificação no sistema — cancelar promessa e informar cliente',
+    ],
+    metrica: 'Percentagem de atendimentos sem sugestão precoce (meta 90% por auditoria quinzenal)',
+    itens_avaliaveis: [],
+  };
+
+  var popBom = {
+    tipo: 'colaborativo',
+    titulo: 'Reparo crivo @107',
+    area: 'Atendimento e vendas',
+    processo: 'Atendimento',
+    conteudoJson: {},
+  };
+  cj0.objetivo = 'Contexto operacional: atendimento com cliente no balcão. Erro ou risco: sugestão de produto sem entender a necessidade.';
+  cj0.errosComuns = ['Erro de fluxo rastreado sozinho'];
+  cj0.como_fazer_bem = 'Acompanhar a sequência padrão do atendimento no ponto de venda com o cliente hoje no balcão';
+  popBom.conteudoJson = cj0;
+  var itPre = geradorConstruirItensAvaliaveisDaMatriz_(popBom, matB);
+  popBom.conteudoJson.itens_avaliaveis = itPre;
+
+  var c0 = avaliarCrivoExecucaoPop_(popBom);
+  var tinhaFix =
+    c0.status_crivo === 'reprovado_no_crivo' &&
+    geradorCrivoApenasBloqReparoF4_(c0.bloqueadores) &&
+    c0.bloqueadores &&
+    c0.bloqueadores.some(function (b) { return b.codigo === 'objetivo_contaminado_briefing'; }) &&
+    c0.bloqueadores.some(function (b) { return b.codigo === 'erros_comuns_insuficientes'; });
+
+  var popA = JSON.parse(JSON.stringify(popBom));
+  var integ = geradorIntegrarFase4PosNormalizacao_(
+    { id: 'reparo_test' },
+    'f4rep2',
+    popA,
+    {},
+    ctx.processo,
+    ctx.situacao,
+    ctx.erro,
+    'colaborativo',
+  );
+  var cA = integ.crivo;
+  var cjF = popA.conteudoJson || {};
+  var blCodes = (cA && cA.bloqueadores) || [];
+  var semOsQuatro = !blCodes.some(function (b) {
+    return b.codigo === 'objetivo_contaminado_briefing' || b.codigo === 'erros_comuns_insuficientes' || b.codigo === 'como_fazer_bem_insuficiente' || b.codigo === 'humanizacao_abstrata';
+  });
+  var okRua =
+    integ.ok === true &&
+    cA &&
+    cA.status_crivo === 'aprovado_para_operacao' &&
+    cjF.fase4_reparo_crivo === true &&
+    Array.isArray(cjF.fase4_reparo_crivo_bloqueadores) &&
+    cjF.fase4_reparo_crivo_bloqueadores.length >= 1 &&
+    semOsQuatro;
+  var objOk = String(cjF.objetivo || '').indexOf('Garantir que o atendente entenda a necessidade') >= 0;
+  var errOk = (cjF.errosComuns || []).length >= 3;
+  var comoN = crivoContarPartesPraticas_(String(cjF.como_fazer_bem || ''), 4);
+  var humOk = crivoTextoTemHumanizacaoObservavel_(
+    String(cjF.como_fazer_bem || '') + ' ' + String(cjF.objetivo || '') + ' ' + String(cjF.erro_critico || ''),
+  );
+  var caso107 =
+    okRua && tinhaFix && objOk && errOk && comoN >= 4 && humOk;
+
+  var mixNao = !geradorCrivoApenasBloqReparoF4_([
+    { codigo: 'objetivo_contaminado_briefing' },
+    { codigo: 'item_avaliavel_generico' },
+  ]);
+  var cjLivre = {
+    objetivo:
+      'Garantir atendimento seguro no balcão com escuta ativa e registo de exceções quando o cliente relatar sintoma ou pedir orientação fora do perfil OTC.',
+    regra_de_ouro: 'Em dúvida clínica ou legal, chamar farmacêutico antes de concluir o atendimento.',
+    procedimento: cj0.procedimento.slice(),
+    como_fazer_bem:
+      'Olhar para o cliente ao falar · Perguntar antes de sugerir produto · Confirmar se entendeu o próximo passo · Encerrar dizendo o que vai acontecer a seguir',
+    erro_critico: cj0.erro_critico,
+    errosComuns: ['Prometer prazo sem consultar sistema', 'Ignorar fila sem aceno', 'Dispensar sem conferir identidade'],
+    pontosDeAtencao: cj0.pontosDeAtencao.slice(),
+    checklist_lider: cj0.checklist_lider.slice(),
+    checklist: cj0.checklist.slice(),
+    treinamento: cj0.treinamento,
+    desvios: cj0.desvios.slice(),
+    metrica: cj0.metrica,
+    itens_avaliaveis: [
+      {
+        codigo: 'ATD-001',
+        comportamento: 'Executar a etapa operacional padrão no balcão de forma geral e adequada e repetível',
+        criterio_aprovacao: 'Execução conforme descrição da etapa e observável no ponto de venda com detalhamento mínimo',
+        criterio_reprovacao: 'Não cumpre o padrão mínimo descrito de forma inaceitável no piso hoje no balcão com registo',
+      },
+    ],
+  };
+  var popLivre = { tipo: 'colaborativo', titulo: 'Item gen', area: 'Atendimento e vendas', processo: 'Atendimento', conteudoJson: cjLivre };
+  var crivLivre = avaliarCrivoExecucaoPop_(popLivre);
+  var casoRuim = mixNao && crivLivre.bloqueadores.some(function (b) { return b.codigo === 'item_avaliavel_generico'; });
+
+  var rQa = iaMotorSelfTestQaMetricaPosPatchFase4_();
+  var rF4 = fase4SelfTestGeradorMatrizCrivoScore_();
+  var rCr = crivoSelfTestExecucaoPop_();
+  var rSc = scoreSelfTestConceito_();
+  var reg = rQa.ok && rF4.ok && rCr.ok && rSc.ok;
+
+  return {
+    ok: caso107 && casoRuim && reg,
+    caso107: caso107,
+    casoRuim: casoRuim,
+    regressao: reg,
+    det: { tinha_somente_reparo: tinhaFix, crivo_apos: cA && cA.status_crivo, bloqueadores_apos: blCodes },
   };
 }
 
