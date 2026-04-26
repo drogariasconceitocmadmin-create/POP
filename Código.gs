@@ -4015,6 +4015,550 @@ function scoreSelfTestConceito_() {
   return { ok: allOk, casos: casos };
 }
 
+// =============================================================================
+// Fase 3 — Crivo de execução (motor isolado; geração ≠ aprovação operacional)
+// =============================================================================
+
+var CRIVO_STATUS_CANONICOS_ = ['rascunho', 'em_revisao', 'reprovado_no_crivo', 'aprovado_com_ajuste', 'aprovado_para_operacao'];
+
+/** Status oficiais do crivo (normalização + validação). */
+function crivoNormalizarStatusExecucao_(status) {
+  var x = iaBagNorm_(String(status == null ? '' : status));
+  if (!x) return '';
+  var map = {
+    rascunho: 'rascunho',
+    emrevisao: 'em_revisao',
+    em_revisao: 'em_revisao',
+    revisao: 'em_revisao',
+    analise: 'em_revisao',
+    reprovado_no_crivo: 'reprovado_no_crivo',
+    reprovado: 'reprovado_no_crivo',
+    reprovado_no_crivo_operacao: 'reprovado_no_crivo',
+    aprovado_com_ajuste: 'aprovado_com_ajuste',
+    aprovadocomajuste: 'aprovado_com_ajuste',
+    ajuste: 'aprovado_com_ajuste',
+    aprovado_para_operacao: 'aprovado_para_operacao',
+    aprovadoparaoperacao: 'aprovado_para_operacao',
+    aprovado: 'aprovado_para_operacao',
+    operacao: 'aprovado_para_operacao',
+  };
+  var k = x.replace(/[\s_\-]/g, '');
+  if (map[k] != null) return map[k];
+  if (map[x] != null) return map[x];
+  return '';
+}
+
+function crivoStatusExecucaoEhValido_(status) {
+  return CRIVO_STATUS_CANONICOS_.indexOf(crivoNormalizarStatusExecucao_(status)) >= 0;
+}
+
+function crivoExtrairConteudoPop_(pop) {
+  var p = pop || {};
+  var cj = p.conteudoJson || p.conteudoObj || {};
+  if (typeof cj === 'string') {
+    try {
+      cj = JSON.parse(cj);
+    } catch (e1) {
+      cj = {};
+    }
+  }
+  if (!cj || typeof cj !== 'object') cj = {};
+  return { pop: p, cj: cj };
+}
+
+function crivoCampoMortoEssencial_(valor, opts) {
+  var o = opts || {};
+  var t = popTextoCampoPublicacao_(valor);
+  if (!String(t).trim()) return true;
+  if (popEsNaoInformadoLiteral_(t)) return true;
+  var k = iaBagNorm_(t);
+  if (k === 'a definir' || k === 'indefinido' || k === 'adefinir') return true;
+  if (k.indexOf('n?o informado') >= 0 || k.indexOf('nao informado') >= 0) return true;
+  if (k.indexOf('nao se aplica') >= 0 || k === 'na' || k === 'n/a') {
+    if (o.permiteNaoSeAplicaJustificado) {
+      var low = String(t).toLowerCase();
+      return low.length < 42 || (low.indexOf('justifica') < 0 && low.indexOf('porque') < 0 && low.indexOf('motivo') < 0);
+    }
+    return true;
+  }
+  return false;
+}
+
+function crivoListaFrasesVagasOperacao_() {
+  return [
+    'atender bem',
+    'ser cordial',
+    'demonstrar empatia',
+    'orientar corretamente',
+    'fazer corretamente',
+    'agir com atencao',
+    'atendimento adequado',
+    'executar conforme padrao',
+    'realizar da melhor forma',
+    'melhorar postura',
+    'reforcar atendimento',
+    'executar corretamente',
+    'com atencao',
+  ];
+}
+
+function crivoTextoTemFraseVaga_(texto) {
+  var bag = iaBagNorm_(texto || '');
+  if (!bag) return false;
+  var list = crivoListaFrasesVagasOperacao_();
+  for (var i = 0; i < list.length; i++) {
+    if (bag.indexOf(list[i]) >= 0) return true;
+  }
+  return false;
+}
+
+function crivoTextoTemHumanizacaoObservavel_(texto) {
+  var bag = iaBagNorm_(texto || '');
+  if (!bag) return false;
+  var sinais = [
+    'reconhecer',
+    'perceber',
+    'dor',
+    'pressa',
+    'inseguranca',
+    'confusao',
+    'adaptar a fala',
+    'adaptar fala',
+    'nao fazer o cliente repetir',
+    'antecipar',
+    'encerrar com clareza',
+    'seguranca no encerramento',
+  ];
+  var n = 0;
+  for (var j = 0; j < sinais.length; j++) {
+    if (bag.indexOf(iaBagNorm_(sinais[j])) >= 0) n++;
+  }
+  return n >= 2;
+}
+
+function crivoObjetivoContaminadoBriefing_(objetivo) {
+  var t = String(objetivo || '');
+  return /situacao\s*:|erro\s+ou\s+risco\s*:|exemplo\s*:|contexto\s+operacional\s*:/i.test(t);
+}
+
+function crivoContarPartesPraticas_(texto, minPartes) {
+  var s = String(texto || '').trim();
+  if (!s) return 0;
+  var parts = s.split(/\n+|(?:\s*[·•]\s*)|(?:\s*;\s*)|(?:\d+[\.)]\s+)/g).filter(function (x) {
+    return String(x).trim().length >= 12;
+  });
+  return parts.length >= minPartes ? parts.length : parts.length;
+}
+
+function crivoChecklistFraco_(arr) {
+  if (!Array.isArray(arr) || arr.length < 5) return true;
+  var curtas = 0;
+  for (var i = 0; i < arr.length; i++) {
+    var u = String(arr[i] == null ? '' : arr[i]).trim();
+    if (u.length < 18) curtas++;
+  }
+  return curtas >= Math.ceil(arr.length * 0.6);
+}
+
+function crivoAcaoCorretivaVaga_(desvios) {
+  if (!Array.isArray(desvios)) return true;
+  var ok = 0;
+  for (var d = 0; d < desvios.length; d++) {
+    var t = String(desvios[d] == null ? '' : desvios[d]).trim();
+    if (t.length < 28) continue;
+    if (crivoTextoTemFraseVaga_(t)) continue;
+    ok++;
+  }
+  return ok < Math.min(2, desvios.length);
+}
+
+function crivoAvaliarItensAvaliaveis_(itens) {
+  var out = { ok: true, motivo: '', evidencia: '' };
+  if (!Array.isArray(itens) || itens.length < 1) return out;
+  var criteriosAprov = [];
+  for (var i = 0; i < itens.length; i++) {
+    var it = itens[i] || {};
+    var comp = String(it.comportamento || it.padrao || it.descricao || it.texto || '').trim();
+    var cap = String(it.criterio_aprovacao || it.criterioAprovacao || '').trim();
+    var cre = String(it.criterio_reprovacao || it.criterioReprovacao || '').trim();
+    if (comp.length < 20) {
+      out.ok = false;
+      out.motivo = 'Item avaliável sem comportamento único suficientemente concreto';
+      out.evidencia = 'item[' + i + ']';
+      return out;
+    }
+    if (cap.length < 12 || cre.length < 12) {
+      out.ok = false;
+      out.motivo = 'Item sem critério claro de aprovação e reprovação';
+      out.evidencia = 'item[' + i + ']';
+      return out;
+    }
+    var bagA = iaBagNorm_(cap);
+    if (bagA.indexOf('execucao conforme descricao da etapa') >= 0 || bagA.indexOf('execução conforme descrição da etapa') >= 0) {
+      out.ok = false;
+      out.motivo = 'Critério genérico proibido (execução conforme descrição da etapa)';
+      out.evidencia = cap.slice(0, 120);
+      return out;
+    }
+    if (bagA.indexOf('observavel no ponto de venda') >= 0 && bagA.length < 45) {
+      out.ok = false;
+      out.motivo = 'Critério vago (observável no ponto de venda sem especificação)';
+      out.evidencia = cap.slice(0, 120);
+      return out;
+    }
+    criteriosAprov.push(bagA);
+  }
+  var uniq = {};
+  for (var u = 0; u < criteriosAprov.length; u++) uniq[criteriosAprov[u]] = true;
+  if (Object.keys(uniq).length === 1 && criteriosAprov.length > 1) {
+    out.ok = false;
+    out.motivo = 'Critério de aprovação repetido em todos os itens avaliáveis';
+    out.evidencia = criteriosAprov[0].slice(0, 120);
+    return out;
+  }
+  return out;
+}
+
+/**
+ * Crivo de execução: POP estruturado (conteudoJson) — não altera persistência.
+ * Flags opcionais no objeto pop: crivo_nao_enviado_ao_crivo, crivo_em_revisao (atalhos de workflow).
+ *
+ * @param {Object} pop POP com conteudoJson / conteudoObj colaborativo típico
+ * @returns {Object}
+ */
+function avaliarCrivoExecucaoPop_(pop) {
+  if (pop && pop.crivo_nao_enviado_ao_crivo === true) {
+    return {
+      status_crivo: 'rascunho',
+      aprovado: false,
+      aprovado_com_ajuste: false,
+      bloqueado: false,
+      bloqueadores: [],
+      alertas: [],
+      score_crivo: null,
+      criterios: [],
+      resumo: 'POP ainda não enviado ao crivo de execução.',
+    };
+  }
+  if (pop && pop.crivo_em_revisao === true) {
+    return {
+      status_crivo: 'em_revisao',
+      aprovado: false,
+      aprovado_com_ajuste: false,
+      bloqueado: false,
+      bloqueadores: [],
+      alertas: [],
+      score_crivo: null,
+      criterios: [],
+      resumo: 'POP em revisão no crivo (análise humana).',
+    };
+  }
+
+  var ex = crivoExtrairConteudoPop_(pop);
+  var cj = ex.cj;
+  var bloqueadores = [];
+  var alertas = [];
+  var criterios = [];
+
+  function addBloq(codigo, motivo, evidencia) {
+    bloqueadores.push({ codigo: codigo, motivo: motivo, evidencia: String(evidencia || '').slice(0, 400) });
+  }
+  function addAlerta(codigo, motivo, evidencia) {
+    alertas.push({ codigo: codigo, motivo: motivo, evidencia: String(evidencia || '').slice(0, 400) });
+  }
+
+  var objetivo = popJsonCampoTextoOuAlternativo_(cj.objetivo, cj.objetivo_pop);
+  var regra = popJsonCampoTextoOuAlternativo_(cj.regra_de_ouro, cj.regraDeOuro);
+  var proc = cj.procedimento || [];
+  var como = popJsonCampoTextoOuAlternativo_(cj.como_fazer_bem, cj.comoFazerBem);
+  var erroC = popJsonCampoTextoOuAlternativo_(cj.erro_critico, cj.erroCritico);
+  var errosComuns = cj.errosComuns || cj.erros_comuns || [];
+  var pAt = cj.pontosDeAtencao || cj.pontos_de_atencao || [];
+  var chkL = cj.checklist_lider || cj.checklistLider || [];
+  var chk = cj.checklist || [];
+  var trein = String(cj.treinamento || '').trim();
+  var desv = cj.desvios || [];
+
+  var essenciais = [
+    { key: 'objetivo', val: objetivo },
+    { key: 'regra_de_ouro', val: regra },
+    { key: 'como_fazer_bem', val: como },
+    { key: 'erro_critico', val: erroC },
+  ];
+  for (var e = 0; e < essenciais.length; e++) {
+    if (crivoCampoMortoEssencial_(essenciais[e].val, { permiteNaoSeAplicaJustificado: false })) {
+      addBloq('campo_morto_essencial', 'Campo essencial vazio ou placeholder inválido', essenciais[e].key);
+    }
+  }
+  if (countProcedimentoEtapasValidas_(proc) < 1) {
+    addBloq('campo_morto_essencial', 'Procedimento ausente ou sem etapas válidas', 'procedimento');
+  }
+
+  if (!crivoCampoMortoEssencial_(objetivo, {}) && crivoObjetivoContaminadoBriefing_(objetivo)) {
+    addBloq('objetivo_contaminado_briefing', 'Objetivo mistura briefing/contexto (Situação/Erro/Exemplo)', String(objetivo).slice(0, 200));
+  }
+
+  if (crivoChecklistFraco_(chk)) {
+    addBloq('checklist_operacional_fraco', 'Checklist operacional abaixo do mínimo ou etapas muito fracas', 'checklist.length=' + (Array.isArray(chk) ? chk.length : 0));
+  }
+  if (!Array.isArray(chkL) || chkL.length < 3 || crivoChecklistFraco_(chkL)) {
+    addBloq('checklist_lider_fraco', 'Checklist do líder abaixo do mínimo ou muito vago', 'checklist_lider');
+  }
+
+  if (!Array.isArray(pAt) || pAt.length < 3) {
+    addBloq('pontos_atencao_insuficientes', 'Pontos de atenção abaixo do mínimo (3)', String((pAt || []).length));
+  }
+
+  var ecArr = Array.isArray(errosComuns) ? errosComuns : [];
+  var ecOk = ecArr.filter(function (x) {
+    return String(x == null ? '' : x).trim() !== '';
+  });
+  if (ecOk.length < 3) {
+    addBloq('erros_comuns_insuficientes', 'Erros comuns / proibido abaixo do mínimo (3 quando aplicável)', String(ecOk.length));
+  }
+
+  if (crivoAcaoCorretivaVaga_(desv)) {
+    addBloq('acao_corretiva_vaga', 'Desvios / ação corretiva genérica ou curta demais', 'desvios');
+  }
+
+  if (crivoContarPartesPraticas_(trein, 2) < 2) {
+    addBloq('treinamento_insuficiente', 'Treinamento precisa de ao menos 2 ações práticas discerníveis', trein.slice(0, 120));
+  }
+
+  if (crivoContarPartesPraticas_(como, 4) < 4) {
+    addBloq('como_fazer_bem_insuficiente', 'Como fazer bem precisa de ao menos 4 orientações práticas', String(como).slice(0, 120));
+  }
+
+  var textoHum = [String(como), String(objetivo), String(erroC)].join(' ');
+  if (crivoTextoTemFraseVaga_(textoHum)) {
+    addBloq('linguagem_vaga_operacional', 'Texto com frase vaga operacional (atender bem, cordial, etc.)', textoHum.slice(0, 160));
+  } else if (!crivoTextoTemHumanizacaoObservavel_(textoHum) && iaBagNorm_(textoHum).indexOf('cliente') >= 0 && iaBagNorm_(textoHum).length > 40) {
+    addBloq('humanizacao_abstrata', 'Humanização sem comportamentos observáveis mínimos (balcão)', 'como_fazer_bem/objetivo');
+  }
+
+  var itensA = cj.itens_avaliaveis || cj.itensAvaliaveis || [];
+  var chkIt = crivoAvaliarItensAvaliaveis_(itensA);
+  if (!chkIt.ok) {
+    addBloq('item_avaliavel_generico', chkIt.motivo, chkIt.evidencia);
+  }
+
+  var clarFalha = crivoCampoMortoEssencial_(objetivo, {}) || crivoObjetivoContaminadoBriefing_(objetivo) || String(objetivo || '').trim().length < 80;
+  var clarOk = !clarFalha;
+  criterios.push({
+    id: 'clareza_operacional',
+    status: clarOk ? 'aprovado' : 'reprovado',
+    motivo: clarOk ? 'Objetivo claro e sem contaminação de briefing' : 'Objetivo precisa ser mais claro ou está contaminado',
+    evidencia: String(objetivo).slice(0, 200),
+    severidade: clarOk ? 'baixa' : 'alta',
+  });
+
+  var nDesv = (Array.isArray(desv) ? desv : []).filter(function (x) {
+    return String(x || '').trim();
+  }).length;
+  var compOk =
+    countProcedimentoEtapasValidas_(proc) >= 3 &&
+    ecOk.length >= 3 &&
+    pAt.length >= 3 &&
+    chkL.length >= 3 &&
+    chk.length >= 5 &&
+    crivoContarPartesPraticas_(trein, 2) >= 2 &&
+    crivoContarPartesPraticas_(como, 4) >= 4 &&
+    nDesv >= 3;
+  if (!compOk && !bloqueadores.length) {
+    addAlerta('completude_reforco', 'Algum mínimo de completude está no limite', 'ver checklist e desvios');
+  }
+  criterios.push({
+    id: 'completude',
+    status: compOk ? 'aprovado' : 'alerta',
+    motivo: compOk ? 'Mínimos de completude atendidos' : 'Completude abaixo do ideal',
+    evidencia: JSON.stringify({
+      proc: countProcedimentoEtapasValidas_(proc),
+      errosComuns: ecOk.length,
+      pAt: pAt.length,
+      chkL: chkL.length,
+      chk: chk.length,
+      desv: (desv || []).length,
+    }),
+    severidade: compOk ? 'baixa' : 'media',
+  });
+
+  var densOk = true;
+  for (var pi = 0; pi < proc.length; pi++) {
+    var ps = String(proc[pi] == null ? '' : proc[pi]).trim();
+    if (ps.length > 0 && ps.length < 25) densOk = false;
+  }
+  if (!densOk) addAlerta('densidade_operacional', 'Algumas etapas do procedimento são curtas demais', 'procedimento');
+  criterios.push({
+    id: 'densidade_operacional',
+    status: densOk ? 'aprovado' : 'alerta',
+    motivo: densOk ? 'Procedimento com etapas operacionais densas' : 'Etapas curtas — reforçar verbo e contexto de piso',
+    evidencia: 'etapas=' + proc.length,
+    severidade: densOk ? 'baixa' : 'media',
+  });
+
+  var met = String(cj.metrica || '').trim();
+  var auditOk = met.length >= 20 && /\b(%|contagem|checklist|prazo|hora|dia|semana|sim\/nao|nao conforme)\b/i.test(met);
+  if (!auditOk) addAlerta('auditabilidade_metrica', 'Métrica pode ficar mais auditável (número, prazo, checklist)', met.slice(0, 120));
+  criterios.push({
+    id: 'auditabilidade',
+    status: auditOk ? 'aprovado' : 'alerta',
+    motivo: auditOk ? 'Métrica com indício de verificação' : 'Métrica fraca para auditoria',
+    evidencia: met.slice(0, 160),
+    severidade: auditOk ? 'baixa' : 'media',
+  });
+
+  var utilOk = trein.length >= 80;
+  if (!utilOk) addAlerta('utilidade_gerencial_treino', 'Treinamento pode ser mais útil para gestão (detalhar práticas)', trein.slice(0, 120));
+  criterios.push({
+    id: 'utilidade_gerencial',
+    status: utilOk ? 'aprovado' : 'alerta',
+    motivo: utilOk ? 'Treinamento com densidade gerencial' : 'Treinamento curto para utilidade gerencial',
+    evidencia: 'len=' + trein.length,
+    severidade: utilOk ? 'baixa' : 'media',
+  });
+
+  var bloqueado = bloqueadores.length > 0;
+  var alertasRelevantes = alertas.some(function (a) {
+    return String(a.codigo || '').indexOf('densidade') >= 0 || String(a.codigo || '').indexOf('auditabilidade') >= 0;
+  })
+    ? alertas.length >= 1
+    : alertas.length >= 2;
+
+  var status_crivo = 'aprovado_para_operacao';
+  if (bloqueado) status_crivo = 'reprovado_no_crivo';
+  else if (alertasRelevantes) status_crivo = 'aprovado_com_ajuste';
+
+  var scorePartes = 0;
+  var scoreTotal = 0;
+  for (var ci = 0; ci < criterios.length; ci++) {
+    scoreTotal++;
+    if (criterios[ci].status === 'aprovado') scorePartes++;
+    else if (criterios[ci].status === 'alerta') scorePartes += 0.5;
+  }
+  var score_crivo = scoreTotal > 0 ? Math.round((scorePartes / scoreTotal) * 10000) / 100 : 0;
+
+  var aprovado = status_crivo === 'aprovado_para_operacao';
+  var aprovado_com_ajuste = status_crivo === 'aprovado_com_ajuste';
+
+  var resumo = bloqueado
+    ? 'Reprovado no crivo: ' + bloqueadores.length + ' bloqueador(es).'
+    : aprovado_com_ajuste
+      ? 'Aprovado com ajustes: revisar alertas antes do piso.'
+      : 'Aprovado para operação.';
+
+  return {
+    status_crivo: status_crivo,
+    aprovado: aprovado,
+    aprovado_com_ajuste: aprovado_com_ajuste,
+    bloqueado: bloqueado,
+    bloqueadores: bloqueadores,
+    alertas: alertas,
+    score_crivo: score_crivo,
+    criterios: criterios,
+    resumo: resumo,
+  };
+}
+
+/**
+ * Self-test do crivo de execução (sem persistência).
+ * @returns {{ ok: boolean, casos: Array<Object> }}
+ */
+function crivoSelfTestExecucaoPop_() {
+  function basePop() {
+    return {
+      titulo: 'POP teste crivo',
+      tipo: 'colaborativo',
+      conteudoJson: {
+        objetivo:
+          'Garantir atendimento seguro no balcão com escuta ativa e registo de exceções quando o cliente relatar sintoma ou pedir orientação fora do perfil OTC.',
+        regra_de_ouro: 'Em dúvida clínica ou legal, chamar farmacêutico antes de concluir o atendimento.',
+        procedimento: [
+          'Cumprimentar e repetir em voz audível o pedido ou a dúvida no balcão',
+          'Confirmar leitura da embalagem antes de explicar posologia de OTC',
+          'Registar no sistema qualquer exceção ou reclamação com data e responsável',
+        ],
+        como_fazer_bem:
+          'Olhar para o cliente ao falar · Perguntar antes de sugerir produto · Confirmar se entendeu o próximo passo · Encerrar dizendo o que vai acontecer a seguir',
+        erro_critico: 'Sugerir produto sem ouvir a necessidade completa no balcão.',
+        errosComuns: ['Prometer prazo sem consultar sistema', 'Ignorar fila sem aceno', 'Dispensar sem conferir identidade'],
+        pontosDeAtencao: ['Fila no rush', 'Cliente idoso', 'SKU em falta na gôndola'],
+        checklist_lider: ['Auditar 3 atendimentos por turno', 'Revisar registo de exceções', 'Confirmar leitura do POP na abertura'],
+        checklist: [
+          'Confirmar identidade do cliente antes de entregar medicamento controlado',
+          'Ler em voz alta o pedido e apontar o passo do POP em execução',
+          'Registar exceção com data, hora e nome do responsável no sistema',
+          'Medir tempo de espera quando há fila e acenar quem chegou por último',
+          'Chamar farmacêutico quando a dúvida exceder OTC ou houver risco clínico',
+        ],
+        treinamento: 'Roleplay de 10 min no balcão. Checklist de observação no piso com 3 itens sim/não.',
+        desvios: [
+          'Cliente sem identificação na retirada de controlado — recusar e chamar farmacêutico',
+          'Fila sem reconhecimento de quem espera mais tempo — corrigir na hora e anotar',
+          'Promessa de prazo sem verificação no sistema — cancelar promessa e informar cliente',
+        ],
+        metrica: 'Percentagem de atendimentos sem sugestão precoce (meta 90% por auditoria quinzenal)',
+      },
+    };
+  }
+  var casos = [];
+
+  var p1 = basePop();
+  var r1 = avaliarCrivoExecucaoPop_(p1);
+  var ok1 = r1.status_crivo === 'aprovado_para_operacao' && r1.aprovado === true && r1.bloqueado === false;
+  casos.push({ id: 1, nome: 'POP bom completo', ok: ok1, det: r1.status_crivo });
+
+  var p2 = basePop();
+  p2.conteudoJson.objetivo = '';
+  var r2 = avaliarCrivoExecucaoPop_(p2);
+  var ok2 = r2.status_crivo === 'reprovado_no_crivo' && r2.bloqueado && r2.bloqueadores.some(function (b) { return b.codigo === 'campo_morto_essencial'; });
+  casos.push({ id: 2, nome: 'campo morto essencial', ok: ok2 });
+
+  var p3 = basePop();
+  p3.conteudoJson.objetivo = 'Situação: cliente no balcão. Erro ou risco: demora. Objetivo real aqui.';
+  var r3 = avaliarCrivoExecucaoPop_(p3);
+  var ok3 = r3.status_crivo === 'reprovado_no_crivo' && r3.bloqueadores.some(function (b) { return b.codigo === 'objetivo_contaminado_briefing'; });
+  casos.push({ id: 3, nome: 'objetivo contaminado', ok: ok3 });
+
+  var p4 = basePop();
+  p4.conteudoJson.checklist = ['a', 'b'];
+  var r4 = avaliarCrivoExecucaoPop_(p4);
+  var ok4 = r4.status_crivo === 'reprovado_no_crivo' && r4.bloqueadores.some(function (b) { return b.codigo === 'checklist_operacional_fraco'; });
+  casos.push({ id: 4, nome: 'checklist fraco', ok: ok4 });
+
+  var p5 = basePop();
+  p5.conteudoJson.desvios = ['orientar corretamente', 'ok ok ok ok ok ok ok', 'curto'];
+  var r5 = avaliarCrivoExecucaoPop_(p5);
+  var ok5 = r5.status_crivo === 'reprovado_no_crivo' && r5.bloqueadores.some(function (b) { return b.codigo === 'acao_corretiva_vaga'; });
+  casos.push({ id: 5, nome: 'ação corretiva vaga', ok: ok5 });
+
+  var p6 = basePop();
+  p6.conteudoJson.como_fazer_bem = 'Demonstrar empatia e ser cordial com o cliente no balcão.';
+  var r6 = avaliarCrivoExecucaoPop_(p6);
+  var ok6 = r6.status_crivo === 'reprovado_no_crivo' && r6.bloqueadores.some(function (b) { return b.codigo === 'linguagem_vaga_operacional'; });
+  casos.push({ id: 6, nome: 'humanização / linguagem vaga', ok: ok6 });
+
+  var p7 = basePop();
+  p7.conteudoJson.itens_avaliaveis = [
+    { comportamento: 'Passo A', criterio_aprovacao: 'Execução conforme descrição da etapa', criterio_reprovacao: 'Não executar' },
+    { comportamento: 'Passo B', criterio_aprovacao: 'Execução conforme descrição da etapa', criterio_reprovacao: 'Não executar' },
+  ];
+  var r7 = avaliarCrivoExecucaoPop_(p7);
+  var ok7 = r7.status_crivo === 'reprovado_no_crivo' && r7.bloqueadores.some(function (b) { return b.codigo === 'item_avaliavel_generico'; });
+  casos.push({ id: 7, nome: 'item avaliável genérico', ok: ok7 });
+
+  var p8 = basePop();
+  p8.conteudoJson.metrica = 'Qualidade no balcão';
+  p8.conteudoJson.procedimento[2] = 'OK';
+  var r8 = avaliarCrivoExecucaoPop_(p8);
+  var ok8 = r8.status_crivo === 'aprovado_com_ajuste' && r8.aprovado_com_ajuste === true && r8.bloqueado === false;
+  casos.push({ id: 8, nome: 'POP bom com ajuste leve', ok: ok8, det: r8.alertas.length });
+
+  var allOk = casos.every(function (c) {
+    return c.ok;
+  });
+  return { ok: allOk, casos: casos };
+}
+
 /**
  * Executar no editor Apps Script: valida que os casos conhecidos normalizam para "nao informado".
  * @returns {{ ok: boolean, detalhes: Array<{entrada: string, normalizado: string, esperado: string, pass: boolean}> }}
