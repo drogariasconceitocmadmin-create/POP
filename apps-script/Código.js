@@ -2396,8 +2396,27 @@ function iaMotorContagemTokens_(texto) {
 function iaMotorTemVerboAcao_(texto) {
   var s = iaBagNorm_(texto || '');
   if (!s) return false;
-  return /\b(falar|dizer|perguntar|responder|explicar|ouvir|olhar|encarar|manter|segurar|apoiar|virar|deixar|levantar|abaixar|apontar|girar|andar|parar|aproximar|afastar|bater|cumprimentar|acenar|esperar|chamar|confirmar|validar|verificar|conferir|checar|ler|mostrar|entregar|abrir|fechar|ligar|desligar|anotar|registar|registrar|escrever|assinar|marcar|indicar|apresentar|repetir|separar|pesar|medir|rotular|etiquetar|armazenar|guardar|limpar|higienizar|desinfetar|empacotar|orientar|avisar|informar|fazer|organizar|repor|recolocar|posicionar|alinhar)\b/.test(
+  return /\b(falar|dizer|perguntar|pergunta|perguntou|responder|responde|explicar|explica|ouvir|ouve|ouviu|olhar|olha|encarar|manter|segurar|apoiar|virar|deixar|levantar|abaixar|apontar|girar|andar|parar|aproximar|afastar|bater|cumprimentar|acenar|esperar|chamar|confirmar|confirma|confirmou|validar|valida|verificar|verifica|verificou|conferir|conferi|checar|ler|mostrar|entregar|entrega|entregou|abrir|fechar|ligar|desligar|anotar|registar|registrar|registra|escrever|assinar|marcar|indicar|indica|apresentar|repetir|separar|pesar|medir|rotular|etiquetar|armazenar|guardar|limpar|higienizar|desinfetar|empacotar|orientar|oriente|avisar|informar|informa|fazer|faz|organizar|repor|recolocar|posicionar|alinhar|entender|entende|entendeu|esclarecer|esclarece|esclareceu|solicitar|solicita|solicitou|identificar|identifica|identificou|escutar|escuta|encaminhar|encaminha|encaminhou|avaliar|avalia|avaliou|retirar|retira|buscar|busca|localizar|localiza|acompanhar|acompanha|finalizar|finaliza|oferecer|oferece|recomendar|recomenda|observar|observa|interromper|interrompe|corrigir|corrige|atender|atende|pedir|pede|agir)\b/.test(
     s
+  );
+}
+
+function iaMotorCritCampoQaComVerboNaoVago_(txt) {
+  var f = String(txt || '').trim();
+  if (!f) return false;
+  return iaMotorTemVerboAcao_(f) && !crivoTextoTemFraseVaga_(f);
+}
+
+function iaMotorCritItemQaAcaoObservavel_(it) {
+  var o = it || {};
+  return (
+    iaMotorCritCampoQaComVerboNaoVago_(o.acao) ||
+    iaMotorCritCampoQaComVerboNaoVago_(o.descricao) ||
+    iaMotorCritCampoQaComVerboNaoVago_(o.padrao) ||
+    iaMotorCritCampoQaComVerboNaoVago_(o.evidencia_minima) ||
+    iaMotorCritCampoQaComVerboNaoVago_(o.criterioAvaliacao) ||
+    iaMotorCritCampoQaComVerboNaoVago_(o.criterio_aprovacao) ||
+    iaMotorCritCampoQaComVerboNaoVago_(o.criterioAprovacao)
   );
 }
 
@@ -2635,9 +2654,7 @@ function iaMotorQaChecklistIncoming_(mergedIn, contract) {
     var items = Array.isArray(m.procedimento) ? m.procedimento : [];
     var okItems = 0;
     for (var j = 0; j < items.length; j++) {
-      var it = items[j] || {};
-      var ac = String(it.acao || it.descricao || '').trim();
-      if (ac && iaMotorTemVerboAcao_(ac)) okItems++;
+      if (iaMotorCritItemQaAcaoObservavel_(items[j])) okItems++;
     }
     if (!items.length || okItems < Math.max(1, Math.ceil(items.length * 0.5))) {
       falhas.push({ codigo: 'acao_observavel', mensagem: 'Itens avaliáveis precisam descrever ação observável (verbo).' });
@@ -5527,6 +5544,95 @@ function iaMotorSelfTestQaMetricaPosPatchFase4_() {
 }
 
 /**
+ * Self-test: QA `acao_observavel` no POP crítico (verbos operacionais + campos; bloqueia frases vagas conhecidas).
+ * @returns {{ ok: boolean, novos_verbos: boolean, tradicional: boolean, vago: boolean, caso108: boolean, regressao: boolean }}
+ */
+function iaMotorSelfTestQaAcaoObservavelCritico_() {
+  var contractB = { execucao: { tempo: 'imediato', frequencia: 'a cada ocorrência' }, controle: { criterio_sucesso: '90% em 30 dias com auditoria quinzenal' } };
+  var mergedB = {
+    metrica: 'Percentual semanal de atendimentos com checklist no balcão (80% em 30 dias com auditoria)',
+    criterio_sucesso: '90% em 30 dias com auditoria quinzenal',
+    como_fazer_bem:
+      'Perguntar a necessidade no balcão antes de sugerir produto, olhar o cliente, registrar a dúvida com data e turno, confirmar o pedido e encaminhar ao farmacêutico quando a dúvida for clínica',
+    erro_critico:
+      'Sugerir medicamento de prateleira sem consultar a queixa e sem chamar o farmacêutico no atendimento de hoje no piso, na fila e no caixa com cliente aguardando muito tempo no horário de pico',
+  };
+
+  var procA = [
+    { itemId: 'A', acao: 'Entender a necessidade do cliente antes de sugerir produto', descricao: 'Entender a necessidade do cliente antes de sugerir produto' },
+    { itemId: 'B', acao: 'Esclarecer a dúvida principal do cliente', descricao: 'Esclarecer a dúvida principal do cliente' },
+    { itemId: 'C', acao: 'Solicitar informação complementar quando necessário', descricao: 'Solicitar informação complementar quando necessário' },
+  ];
+  var fa = iaMotorQaChecklistIncoming_(Object.assign({ tipo: 'critico', procedimento: procA }, mergedB), contractB);
+  var okNovos = !fa.some(function (x) { return x.codigo === 'acao_observavel'; });
+
+  var procT = [
+    { itemId: 'T1', acao: 'Perguntar a necessidade do cliente', descricao: 'Perguntar a necessidade do cliente' },
+    { itemId: 'T2', acao: 'Confirmar o entendimento com frase curta', descricao: 'Confirmar o entendimento com frase curta' },
+    { itemId: 'T3', acao: 'Encaminhar ao farmacêutico quando a dúvida for técnica', descricao: 'Encaminhar ao farmacêutico quando a dúvida for técnica' },
+  ];
+  var ft = iaMotorQaChecklistIncoming_(Object.assign({ tipo: 'critico', procedimento: procT }, mergedB), contractB);
+  var okTr = !ft.some(function (x) { return x.codigo === 'acao_observavel'; });
+
+  var procV = [
+    { itemId: 'V1', acao: 'Atendimento adequado e cordial com atenção mínima', descricao: 'Atendimento adequado e cordial com atenção mínima' },
+    { itemId: 'V2', acao: 'Agir com atenção geral e postura mínima', descricao: 'Agir com atenção geral e postura mínima' },
+    { itemId: 'V3', acao: 'Melhorar postura e reforçar o atendimento geral hoje e sempre e sempre e sempre e sempre e sempre e sempre e sempre e sempre e sempre e sempre e sempre e sempre e sempre e sempre e sempre e sempre e sempre e sempre e sempre e sempre e sempre e sempre e sempre e sempre e sempre e sempre e sempre e sempre e sempre e sempre e sempre e sempre e sempre e sempre e sempre e sempre e sempre e sempre e sempre e sempre e sempre e sempre e sempre e sempre e sempre e sempre e sempre e sempre e sempre e sempre e sempre e sempre e sempre e sempre e sempre e sempre e sempre e sempre e sempre e sempre e sempre e sempre e sempre e sempre e sempre e sempre e sempre e sempre e sempre e sempre e sempre e sempre e sempre e sempre e sempre e sempre e sempre e sempre e sempre e sempre e sempre e sempre e sempre e sempre e sempre e sempre e sempre e sempre e sempre e sempre e sempre e sempre e sempre e sempre e sempre e sempre e sempre e sempre e sempre e always e always e always e always' },
+  ];
+  var fv = iaMotorQaChecklistIncoming_(Object.assign({ tipo: 'critico', procedimento: procV }, mergedB), contractB);
+  var okVago = fv.some(function (x) { return x.codigo === 'acao_observavel'; });
+
+  var contr108 = {
+    titulo: 'POP @108',
+    area: 'Atendimento e vendas',
+    processo: 'atendimento no balcão',
+    execucao: {
+      o_que_fazer: [
+        'Entender a necessidade do cliente antes de sugerir produto no balcão',
+        'Esclarecer a dúvida principal do cliente com clareza e voz audível no ponto de venda',
+        'Solicitar informação complementar quando a dúvida ainda for ambígua no ponto de venda e no caixa',
+      ],
+      tempo: 'imediato',
+      frequencia: 'a cada ocorrência',
+    },
+    controle: {
+      metrica: 'Meta 80% com auditoria quinzenal de balcão em 30 dias consecutivos',
+      criterio_sucesso: '90% com auditoria quinzenal de balcão em 30 dias consecutivos',
+      erros_graves: ['Sugerir produto sem entender a necessidade completa do cliente no balcão.'],
+    },
+    abordagem: {},
+    contexto: { quando_aplicar: 'Cliente com dúvida no ponto de venda' },
+  };
+  var merge108 = mapContratoIaConceitoToIncoming_(
+    {},
+    contr108,
+    'critico',
+    'cliente chega com dúvida',
+    'atendente sugere produto sem entender a necessidade',
+  );
+  merge108.como_fazer_bem = mergedB.como_fazer_bem;
+  merge108.erro_critico = mergedB.erro_critico;
+  var c108q = { execucao: contr108.execucao, controle: contr108.controle, abordagem: {} };
+  var f108 = iaMotorQaChecklistIncoming_(merge108, c108q);
+  var ok108 = !f108.some(function (x) { return x.codigo === 'acao_observavel'; });
+
+  var rQa = iaMotorSelfTestQaMetricaPosPatchFase4_();
+  var r4 = fase4SelfTestGeradorMatrizCrivoScore_();
+  var rC = crivoSelfTestExecucaoPop_();
+  var rS = scoreSelfTestConceito_();
+  var reg = rQa.ok && r4.ok && rC.ok && rS.ok;
+
+  return {
+    ok: okNovos && okTr && okVago && ok108 && reg,
+    novos_verbos: okNovos,
+    tradicional: okTr,
+    vago: okVago,
+    caso108: ok108,
+    regressao: reg,
+  };
+}
+
+/**
  * Reparo pós-crivo (1 passada) no fluxo Fase 4.
  * @returns {{ ok: boolean, caso107: boolean, casoRuim: boolean, regressao: boolean, det: Object }}
  */
@@ -5661,10 +5767,11 @@ function fase4SelfTestReparoCrivoPosGeracao_() {
   var casoRuim = mixNao && crivLivre.bloqueadores.some(function (b) { return b.codigo === 'item_avaliavel_generico'; });
 
   var rQa = iaMotorSelfTestQaMetricaPosPatchFase4_();
+  var rAc = iaMotorSelfTestQaAcaoObservavelCritico_();
   var rF4 = fase4SelfTestGeradorMatrizCrivoScore_();
   var rCr = crivoSelfTestExecucaoPop_();
   var rSc = scoreSelfTestConceito_();
-  var reg = rQa.ok && rF4.ok && rCr.ok && rSc.ok;
+  var reg = rQa.ok && rAc.ok && rF4.ok && rCr.ok && rSc.ok;
 
   return {
     ok: caso107 && casoRuim && reg,
