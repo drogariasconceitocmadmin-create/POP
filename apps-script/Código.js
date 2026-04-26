@@ -4737,6 +4737,15 @@ function fase4ItemEnumCamposOficiaisValidos_(item) {
   return true;
 }
 
+/** Todos os códigos de matriz no mapeamento pertencem à mesma família (prefixo ATD- ou EST-). */
+function fase4CodigosSoFamilia_(refs, prefix) {
+  var list = (refs && refs.codigos_matriz_mae) || [];
+  for (var i = 0; i < list.length; i++) {
+    if (String(list[i] == null ? '' : list[i]).indexOf(String(prefix)) !== 0) return false;
+  }
+  return true;
+}
+
 /** Cada item deve usar codigo (e codigo_matriz_mae) presentes em matrizRefs.codigos_matriz_mae; enums oficiais. */
 function fase4ValidarItensRastreioMatrizEEnums_(itens, matrizRefs) {
   if (!Array.isArray(itens) || itens.length < 1) return false;
@@ -4834,10 +4843,27 @@ function matrizMaeRowPorCodigoF4_(cod) {
   return null;
 }
 
+/** Só códigos cuja família no catálogo coincide com a família alvo (coerência ATD vs EST). */
+function geradorFiltrarCodigosPorFamiliaMatriz_(codigos, familia) {
+  var fam = String(familia || '').toUpperCase();
+  var cat = matrizMaeCatalogoConceito_();
+  var mapa = {};
+  for (var h = 0; h < cat.length; h++) {
+    mapa[String(cat[h].codigo)] = String(cat[h].familia || '').toUpperCase();
+  }
+  var out = [];
+  for (var i = 0; i < (codigos || []).length; i++) {
+    var c = String(codigos[i] == null ? '' : codigos[i]).trim();
+    if (!c) continue;
+    if (mapa[c] === fam) out.push(c);
+  }
+  return out;
+}
+
 /** Garante pelo menos dois códigos distintos da família mapeada para itens duplets. */
 function geradorCompletarCodigosMatrizMae_(codigos, familia) {
-  var out = (codigos || []).slice();
   var fam = String(familia || '').toUpperCase();
+  var out = geradorFiltrarCodigosPorFamiliaMatriz_(codigos, familia);
   var cat = matrizMaeCatalogoConceito_();
   var famRows = cat.filter(function (r) {
     return String(r.familia || '').toUpperCase() === fam;
@@ -4880,11 +4906,12 @@ function geradorMapearMatrizConceito_(contexto) {
     return b.score - a.score;
   });
   var best = scores.length && scores[0].score > 0 ? scores[0].row : cat[0];
+  var familiaP = String(best.familia || '');
   var alerta = !scores.length || scores[0].score < 1;
   var codigos = [];
   var padroes = [];
   for (var s = 0; s < scores.length && s < 4; s++) {
-    if (scores[s].score > 0) {
+    if (scores[s].score > 0 && String(scores[s].row.familia || '') === familiaP) {
       codigos.push(scores[s].row.codigo);
       padroes.push(scores[s].row.familia + ': ' + scores[s].row.padrao);
     }
@@ -4893,7 +4920,7 @@ function geradorMapearMatrizConceito_(contexto) {
     codigos.push(best.codigo);
     padroes.push(best.familia + ': ' + best.padrao);
   }
-  codigos = geradorCompletarCodigosMatrizMae_(codigos, best.familia);
+  codigos = geradorCompletarCodigosMatrizMae_(codigos, familiaP);
   return {
     dominio: best.dominio,
     secao_sugerida: best.secao,
@@ -4902,7 +4929,7 @@ function geradorMapearMatrizConceito_(contexto) {
     codigos_matriz_mae: codigos,
     padroes_relacionados: padroes,
     alerta_mapeamento_aproximado: alerta,
-    familia_prioritaria: best.familia,
+    familia_prioritaria: familiaP,
   };
 }
 
@@ -5214,7 +5241,8 @@ function fase4SelfTestGeradorMatrizCrivoScore_() {
   var okMat1 =
     (mat1.codigos_matriz_mae || []).indexOf('ATD-001') >= 0 &&
     (mat1.dominio || '').indexOf('atend') >= 0 &&
-    (mat1.padroes_relacionados || []).some(function (p) { return String(p).indexOf('ATD') >= 0; });
+    (mat1.padroes_relacionados || []).some(function (p) { return String(p).indexOf('ATD') >= 0; }) &&
+    fase4CodigosSoFamilia_(mat1, 'ATD-');
 
   var pop1 = {
     tipo: 'colaborativo',
@@ -5261,6 +5289,7 @@ function fase4SelfTestGeradorMatrizCrivoScore_() {
   var ok1 =
     okMat1 &&
     itens1.length >= 2 &&
+    itens1.every(function (it) { return String((it && it.codigo) || '').indexOf('ATD-') === 0; }) &&
     morto1.ok &&
     crivo1.status_crivo === 'aprovado_para_operacao' &&
     score1 &&
@@ -5292,7 +5321,9 @@ function fase4SelfTestGeradorMatrizCrivoScore_() {
     f4c.crivo != null &&
     f4c.score_conceito != null &&
     pop4.conteudoJson.fase4_score_conceito != null &&
-    geradorValidarCamposEssenciaisFase4_(pop4).ok;
+    geradorValidarCamposEssenciaisFase4_(pop4).ok &&
+    f4c.matriz != null &&
+    fase4CodigosSoFamilia_(f4c.matriz, 'ATD-');
 
   casos.push({
     id: 2,
@@ -5309,7 +5340,9 @@ function fase4SelfTestGeradorMatrizCrivoScore_() {
     linhaPop: 'colaborativo',
     conteudoGerado: {},
   });
-  var okMat2 = mat2.familia_prioritaria === 'EST' || (mat2.codigos_matriz_mae || []).indexOf('EST-001') >= 0;
+  var okMat2 =
+    (mat2.familia_prioritaria === 'EST' || (mat2.codigos_matriz_mae || []).indexOf('EST-001') >= 0) &&
+    fase4CodigosSoFamilia_(mat2, 'EST-');
   var pop2 = JSON.parse(JSON.stringify(pop1));
   pop2.conteudoJson.objetivo =
     'Manter circulação segura no salão com passagens livres e sinalização adequada para o cliente.';
@@ -5317,7 +5350,12 @@ function fase4SelfTestGeradorMatrizCrivoScore_() {
   var itens2 = geradorConstruirItensAvaliaveisDaMatriz_(pop2, mat2);
   itens2[1].resultado = 'nao';
   var score2 = calcularScoreExecucaoConceito_(itens2);
-  var ok2 = okMat2 && score2.falha_critica === true && fase4ValidarItensRastreioMatrizEEnums_(itens2, mat2);
+  var ok2 =
+    okMat2 &&
+    fase4CodigosSoFamilia_(mat2, 'EST-') &&
+    itens2.every(function (it) { return String((it && it.codigo) || '').indexOf('EST-') === 0; }) &&
+    score2.falha_critica === true &&
+    fase4ValidarItensRastreioMatrizEEnums_(itens2, mat2);
 
   casos.push({
     id: 3,
