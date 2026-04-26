@@ -2919,7 +2919,30 @@ function gerarPopIaConceito(token, processo, situacao, erro) {
     normalized.conteudoJson.linha_pop_ia = String(linhaServ || '');
   } catch (eMeta) {}
 
-  return { ok: true, requestId: requestId, data: normalized, contract: contract };
+  var fase4 = geradorIntegrarFase4PosNormalizacao_(ctx.user, requestId, normalized, contract, pIn, sIn, eIn, linhaServ);
+  if (!fase4.ok) {
+    var blockF4 = [];
+    if (fase4.crivo && fase4.crivo.bloqueadores && fase4.crivo.bloqueadores.length) {
+      for (var bfi = 0; bfi < fase4.crivo.bloqueadores.length; bfi++) {
+        var bb = fase4.crivo.bloqueadores[bfi];
+        blockF4.push(String((bb && bb.codigo) || '') + ': ' + String((bb && bb.motivo) || ''));
+      }
+    } else if (fase4.message) {
+      blockF4.push(fase4.message);
+    } else {
+      blockF4.push('Bloqueio Fase 4 (crivo/campos).');
+    }
+    logGptPopIaLinha_(ctx.user, requestId, 'fase4_gerador_bloqueio', fase4.message || '', { crivo: fase4.crivo, matriz: fase4.matriz });
+    return {
+      ok: false,
+      requestId: requestId,
+      message: fase4.message || 'POP não aprovado no crivo de execução.',
+      blocking: blockF4,
+      fase4: fase4,
+    };
+  }
+
+  return { ok: true, requestId: requestId, data: normalized, contract: contract, fase4: fase4 };
 }
 
 function criarPop(token, data) {
@@ -4657,6 +4680,511 @@ function crivoSelfTestExecucaoPop_() {
     return c.ok;
   });
   return { ok: allOk, casos: casos };
+}
+
+// =============================================================================
+// Fase 4 — Gerador + Matriz_Mae (conceito) + Crivo + Score (integração incremental)
+// =============================================================================
+
+/** Catálogo conceitual alinhado ao motor de score; códigos estáveis para referência (não inventar fora daqui). */
+function matrizMaeCatalogoConceito_() {
+  return [
+    {
+      codigo: 'ATD-BA-01',
+      familia: 'ATD',
+      dominio: 'atendimento/balcão',
+      gatilhos: ['atend', 'balc', 'cliente', 'dúvida', 'duvida', 'sugere', 'produto', 'necess', 'escuta', 'pergunta'],
+      secao: 'Atendimento no balcão de medicamentos',
+      dimensao: 'Escuta e orientação ao cliente',
+      classificacao: 'Comunicação e escuta (Básico)',
+      padrao: 'Confirmar a necessidade antes de sugerir produto no balcão',
+    },
+    {
+      codigo: 'ATD-BA-02',
+      familia: 'ATD',
+      dominio: 'atendimento/balcão',
+      gatilhos: ['humaniz', 'tom', 'postura', 'cordial', 'acolh', 'olhar', 'fala'],
+      secao: 'Atendimento no balcão de medicamentos',
+      dimensao: 'Conduta e postura no atendimento',
+      classificacao: 'Humanização observável (Básico)',
+      padrao: 'Postura e linguagem alinhadas ao protocolo de acolhimento',
+    },
+    {
+      codigo: 'ATD-SG-01',
+      familia: 'ATD',
+      dominio: 'atendimento/balcão',
+      gatilhos: ['segur', 'farmaceut', 'controlad', 'otc', 'orient'],
+      secao: 'Atendimento no balcão de medicamentos',
+      dimensao: 'Segurança do medicamento e encaminhamento',
+      classificacao: 'Segurança operacional (Crítico)',
+      padrao: 'Encaminhar ao farmacêutico quando a dúvida exceder OTC ou houver risco',
+    },
+    {
+      codigo: 'EST-OR-01',
+      familia: 'EST',
+      dominio: 'estrutura/organização',
+      gatilhos: ['organiz', 'salão', 'corredor', 'passagem', 'circular', 'caixa', 'bloque', 'gôndola', 'loja'],
+      secao: 'Loja e operação diária',
+      dimensao: 'Circulação e organização do piso',
+      classificacao: 'Conveniência e segurança de circulação (Básico)',
+      padrao: 'Manter corredores e passagens livres para circulação segura do cliente',
+    },
+    {
+      codigo: 'EST-SG-01',
+      familia: 'EST',
+      dominio: 'estrutura/organização',
+      gatilhos: ['queda', 'acidente', 'atropel', 'emerg', 'evacu'],
+      secao: 'Loja e operação diária',
+      dimensao: 'Risco estrutural e emergência',
+      classificacao: 'Segurança física (Crítico)',
+      padrao: 'Eliminar ou sinalizar obstáculos com risco imediato de queda ou atropelamento',
+    },
+  ];
+}
+
+/**
+ * Mapeia entrada do gerador para referências da Matriz_Mae (conceito).
+ * @param {{ processo: string, situacao: string, erro: string, area: string, linhaPop: string, conteudoGerado: Object }} contexto
+ */
+function geradorMapearMatrizConceito_(contexto) {
+  var cx = contexto || {};
+  var blob = iaBagNorm_(
+    String(cx.processo || '') + ' ' + String(cx.situacao || '') + ' ' + String(cx.erro || '') + ' ' + String(cx.area || ''),
+  );
+  var cat = matrizMaeCatalogoConceito_();
+  var scores = [];
+  for (var i = 0; i < cat.length; i++) {
+    var row = cat[i];
+    var g = row.gatilhos || [];
+    var n = 0;
+    for (var gk = 0; gk < g.length; gk++) {
+      if (blob.indexOf(iaBagNorm_(g[gk])) >= 0) n++;
+    }
+    scores.push({ row: row, score: n });
+  }
+  scores.sort(function (a, b) {
+    return b.score - a.score;
+  });
+  var best = scores.length && scores[0].score > 0 ? scores[0].row : cat[0];
+  var alerta = !scores.length || scores[0].score < 1;
+  var codigos = [];
+  var padroes = [];
+  for (var s = 0; s < scores.length && s < 4; s++) {
+    if (scores[s].score > 0) {
+      codigos.push(scores[s].row.codigo);
+      padroes.push(scores[s].row.familia + ': ' + scores[s].row.padrao);
+    }
+  }
+  if (!codigos.length) {
+    codigos.push(best.codigo);
+    padroes.push(best.familia + ': ' + best.padrao);
+  }
+  return {
+    dominio: best.dominio,
+    secao_sugerida: best.secao,
+    dimensao_sugerida: best.dimensao,
+    classificacao_sugerida: best.classificacao,
+    codigos_matriz_mae: codigos,
+    padroes_relacionados: padroes,
+    alerta_mapeamento_aproximado: alerta,
+    familia_prioritaria: best.familia,
+  };
+}
+
+function geradorCampoTextoMortoF4_(v) {
+  if (v == null) return true;
+  var t = String(v).trim();
+  if (!t) return true;
+  if (popEsNaoInformadoLiteral_(t)) return true;
+  var k = popNormTextoPlaceholder_(t);
+  if (k === 'a definir' || k === 'indefinido') return true;
+  if (/^n\?o\s+informado$/i.test(String(t).trim())) return true;
+  return false;
+}
+
+function geradorEnriquecerConteudoColaborativoMinimoCrivo_(cj, contract, situacaoIn, erroIn) {
+  if (!cj || typeof cj !== 'object') return;
+  var c = contract || {};
+  var exec = c.execucao || {};
+  var ctl = c.controle || {};
+  var steps = Array.isArray(exec.o_que_fazer) ? exec.o_que_fazer.map(function (x) { return String(x == null ? '' : x).trim(); }).filter(Boolean) : [];
+  var eg = Array.isArray(ctl.erros_graves) ? ctl.erros_graves.map(function (x) { return String(x == null ? '' : x).trim(); }).filter(Boolean) : [];
+  var ecs = Array.isArray(cj.errosComuns) ? cj.errosComuns.slice() : [];
+
+  if (geradorCampoTextoMortoF4_(cj.regra_de_ouro)) {
+    cj.regra_de_ouro =
+      'Em dúvida clínica ou de produto, confirmar a necessidade com o cliente e escalar ao farmacêutico quando o risco exceder o balcão.';
+  }
+  if (!Array.isArray(cj.pontosDeAtencao) || cj.pontosDeAtencao.length < 3) {
+    var pd = Array.isArray(cj.pontosDeAtencao) ? cj.pontosDeAtencao.slice() : [];
+    while (pd.length < 3) {
+      pd.push('Fila no horário de pico — manter olhar no cliente e prioridade de quem aguarda há mais tempo');
+    }
+    cj.pontosDeAtencao = pd;
+  }
+  if (!Array.isArray(cj.checklist_lider) || cj.checklist_lider.length < 3) {
+    var cl = Array.isArray(cj.checklist_lider) ? cj.checklist_lider.slice() : [];
+    var clPad = [
+      'Auditar dois atendimentos por turno verificando escuta e encaminhamento conforme POP',
+      'Rever registo de exceções e devolutiva ao colaborador na mesma semana',
+      'Confirmar leitura do POP na abertura do turno no balcão',
+    ];
+    for (var ci = 0; ci < clPad.length && cl.length < 3; ci++) {
+      if (cl.indexOf(clPad[ci]) < 0) cl.push(clPad[ci]);
+    }
+    cj.checklist_lider = cl.slice(0, Math.max(3, cl.length));
+  }
+  if (!Array.isArray(cj.checklist) || cj.checklist.length < 5) {
+    var ck = Array.isArray(cj.checklist) ? cj.checklist.slice() : [];
+    for (var si = 0; si < steps.length && ck.length < 5; si++) {
+      var line = 'Executar etapa operacional: ' + String(steps[si]).slice(0, 120);
+      ck.push(line);
+    }
+    var seed = String(ctl.criterio_sucesso || cj.metrica || '').trim();
+    while (ck.length < 5) {
+      ck.push('Verificar conformidade com critério de sucesso: ' + (seed ? seed.slice(0, 80) : 'observação no piso com registo'));
+    }
+    cj.checklist = ck.slice(0, Math.max(5, ck.length));
+  }
+  if (!Array.isArray(cj.desvios) || cj.desvios.length < 3) {
+    var dv = Array.isArray(cj.desvios) ? cj.desvios.slice() : [];
+    for (var ei = 0; ei < ecs.length && dv.length < 3; ei++) {
+      dv.push(String(ecs[ei]));
+    }
+    for (var ej = 0; ej < eg.length && dv.length < 3; ej++) {
+      var dline = 'Corrigir na hora: ' + String(eg[ej]).slice(0, 160);
+      if (dv.indexOf(dline) < 0) dv.push(dline);
+    }
+    while (dv.length < 3) {
+      dv.push('Registrar ocorrência no sistema e comunicar ao farmacêutico quando houver risco.');
+    }
+    cj.desvios = dv.slice(0, Math.max(3, dv.length));
+  }
+  if (geradorCampoTextoMortoF4_(cj.treinamento)) {
+    var erT = String(erroIn || '').trim().slice(0, 80);
+    cj.treinamento =
+      'Roleplay de 10 minutos no balcão com cenário de ' +
+      (erT || 'atendimento') +
+      '. Observação de campo com checklist sim/não no mesmo turno. Retorno de feedback ao colaborador na semana.';
+  }
+}
+
+/**
+ * Itens no formato do score + metadados + chaves compatíveis com o crivo (comportamento / critérios).
+ */
+function geradorConstruirItensAvaliaveisDaMatriz_(pop, matrizRefs) {
+  var refs = matrizRefs || {};
+  var cj = (pop && pop.conteudoJson) || {};
+  var fam = String(refs.familia_prioritaria || '').toUpperCase();
+  var sec = String(refs.secao_sugerida || 'Atendimento no balcão de medicamentos');
+  var dimA = String(refs.dimensao_sugerida || 'Escuta e orientação ao cliente');
+  var dimB = String(refs.dimensao_sugerida || 'Conduta no piso');
+  var clsA = String(refs.classificacao_sugerida || 'Comunicação e escuta (Básico)');
+  var clsB = 'Verificação operacional (Básico)';
+  var out = [];
+  function pushItem(cod, dim, cls, grav, comp, cap, cre, tipo, canal, aplic) {
+    out.push({
+      codigo: cod,
+      secao: sec,
+      dimensao: dim,
+      classificacao: cls,
+      tipo: tipo || 'colaborativo',
+      canal: canal || 'piso',
+      aplicabilidade: aplic || 'operacao_diaria',
+      padrao: comp,
+      evidencia_minima: 'Registo em checklist de piso ou evidência equivalente',
+      gravidade: grav,
+      resultado: '',
+      pontuacao: '',
+      observacoes: '',
+      acao_corretiva_padrao: scoreConceitoAcaoCorretivaPadraoPorCodigo_(cod),
+      responsavel_correcao: '',
+      prazo_correcao: '',
+      status_correcao: 'pendente_avaliacao',
+      data_reauditoria_prevista: null,
+      comportamento: comp,
+      criterio_aprovacao: cap,
+      criterio_reprovacao: cre,
+    });
+  }
+  if (fam === 'EST') {
+    pushItem(
+      'EST-OP-01',
+      dimA,
+      clsA,
+      'normal',
+      'Corredor e passagem permanecem livres para circulação do cliente sem obstrução de caixas ou paletes',
+      'Área de passagem verificada sem bloqueio acima do limite definido pela loja',
+      'Obstáculo fixo ou temporário impede circulação segura ou força desvio em área de risco',
+      'colaborativo',
+      'loja',
+      'organizacao',
+    );
+    pushItem(
+      'EST-SG-02',
+      'Risco e segurança no piso',
+      'Segurança física (Crítico)',
+      'critica',
+      'Obstáculo com risco de queda ou atropelamento é sinalizado e removido ou isolado no mesmo turno',
+      'Isolamento ou remoção registrada com responsável e prazo',
+      'Obstáculo permanece sem sinalização ou sem ação no prazo',
+      'colaborativo',
+      'loja',
+      'seguranca',
+    );
+  } else {
+    pushItem(
+      'ATD-EX-01',
+      dimA,
+      clsA,
+      'normal',
+      'Colaborador confirma a necessidade ou a dúvida do cliente antes de sugerir produto no balcão',
+      'Repetição ou confirmação da necessidade em voz audível ou registo no fluxo do balcão',
+      'Sugestão de produto sem confirmação prévia da necessidade',
+      'colaborativo',
+      'balcão',
+      'atendimento',
+    );
+    pushItem(
+      'ATD-EX-02',
+      'Conduta e escuta',
+      'Humanização observável (Básico)',
+      'normal',
+      'Registo de exceção quando a orientação sair do perfil OTC ou houver risco clínico',
+      'Exceção com data, hora e responsável no sistema ou livro definido',
+      'Seguimento sem registo quando a exceção exigir rastreio',
+      'colaborativo',
+      'balcão',
+      'atendimento',
+    );
+  }
+  return out;
+}
+
+function geradorValidarCamposEssenciaisFase4_(pop) {
+  var erros = [];
+  var cj = (pop && pop.conteudoJson) || {};
+  var camposStr = [
+    { k: 'objetivo', v: cj.objetivo },
+    { k: 'regra_de_ouro', v: cj.regra_de_ouro },
+    { k: 'como_fazer_bem', v: cj.como_fazer_bem || cj.comoFazerBem },
+    { k: 'erro_critico', v: cj.erro_critico || cj.erroCritico },
+    { k: 'treinamento', v: cj.treinamento },
+  ];
+  for (var i = 0; i < camposStr.length; i++) {
+    if (geradorCampoTextoMortoF4_(camposStr[i].v)) {
+      erros.push('Campo essencial vazio ou placeholder: ' + camposStr[i].k);
+    }
+  }
+  var proc = cj.procedimento;
+  if (!Array.isArray(proc) || countProcedimentoEtapasValidas_(proc) < 1) {
+    erros.push('Procedimento obrigatório com pelo menos uma etapa válida');
+  }
+  var pAt = cj.pontosDeAtencao || [];
+  if (!Array.isArray(pAt) || pAt.length < 3) erros.push('pontosDeAtencao: mínimo 3 itens');
+  var chkL = cj.checklist_lider || cj.checklistLider || [];
+  if (!Array.isArray(chkL) || chkL.length < 3) erros.push('checklist_lider: mínimo 3 itens');
+  var chk = cj.checklist || [];
+  if (!Array.isArray(chk) || chk.length < 5) erros.push('checklist operacional: mínimo 5 itens');
+  var desv = cj.desvios || [];
+  if (!Array.isArray(desv) || desv.filter(function (x) { return String(x || '').trim(); }).length < 3) {
+    erros.push('desvios: mínimo 3 entradas');
+  }
+  return { ok: erros.length === 0, erros: erros };
+}
+
+function geradorAplicarMetadadosCrivoNoConteudo_(cj, crivo) {
+  if (!cj || typeof cj !== 'object') return;
+  if (!crivo || typeof crivo !== 'object') return;
+  cj.status_crivo = String(crivo.status_crivo || '');
+  cj.bloqueadores_crivo = crivo.bloqueadores || [];
+  cj.alertas_crivo = crivo.alertas || [];
+  cj.score_crivo = crivo.score_crivo;
+  cj.resumo_crivo = String(crivo.resumo || '');
+}
+
+/**
+ * Integração Fase 4 após normalize no gerador IA: enriquecimento, itens, validação, crivo, score.
+ * @returns {{ ok: boolean, crivo: Object, score_conceito: Object, matriz: Object, preview_bloqueado_publicacao: boolean, message: string }}
+ */
+function geradorIntegrarFase4PosNormalizacao_(user, requestId, normalized, contract, processoIn, situacaoIn, erroIn, linhaServ) {
+  void user;
+  void requestId;
+  void linhaServ;
+  var out = {
+    ok: true,
+    crivo: null,
+    score_conceito: null,
+    matriz: null,
+    preview_bloqueado_publicacao: false,
+    message: '',
+  };
+  if (!normalized || typeof normalized !== 'object') {
+    out.ok = false;
+    out.message = 'Payload inválido para Fase 4';
+    return out;
+  }
+  if (normalizeTipoPop_(normalized.tipo) !== 'colaborativo') {
+    return out;
+  }
+  var cj = normalized.conteudoJson || {};
+  geradorEnriquecerConteudoColaborativoMinimoCrivo_(cj, contract, situacaoIn, erroIn);
+  normalized.conteudoJson = cj;
+
+  var matriz = geradorMapearMatrizConceito_({
+    processo: processoIn,
+    situacao: situacaoIn,
+    erro: erroIn,
+    area: normalized.area,
+    linhaPop: linhaServ,
+    conteudoGerado: cj,
+  });
+  out.matriz = matriz;
+  cj.fase4_matriz_mapeamento = matriz;
+
+  var itens = geradorConstruirItensAvaliaveisDaMatriz_(normalized, matriz);
+  cj.itens_avaliaveis = itens;
+
+  var val = geradorValidarCamposEssenciaisFase4_(normalized);
+  if (!val.ok) {
+    out.ok = false;
+    out.message = val.erros.join(' | ');
+    return out;
+  }
+
+  var crivo = avaliarCrivoExecucaoPop_(normalized);
+  out.crivo = crivo;
+  geradorAplicarMetadadosCrivoNoConteudo_(cj, crivo);
+  out.preview_bloqueado_publicacao =
+    crivo.status_crivo === 'reprovado_no_crivo' || crivo.status_crivo === 'aprovado_com_ajuste';
+
+  var scoreC = calcularScoreExecucaoConceito_(itens);
+  out.score_conceito = scoreC;
+  cj.fase4_score_conceito = scoreC;
+
+  if (crivo.status_crivo === 'reprovado_no_crivo') {
+    out.ok = false;
+    out.message = String(crivo.resumo || 'Reprovado no crivo de execução.');
+    return out;
+  }
+  if (crivo.status_crivo === 'aprovado_com_ajuste') {
+    cj.crivo_preview_apenas = true;
+    out.message = 'Aprovado com ajustes: rever alertas antes de publicar.';
+  }
+  return out;
+}
+
+/**
+ * Self-test Fase 4 (sem OpenAI): matriz, itens, crivo, campos e score.
+ */
+function fase4SelfTestGeradorMatrizCrivoScore_() {
+  var casos = [];
+
+  var mat1 = geradorMapearMatrizConceito_({
+    processo: 'atendimento no balcão',
+    situacao: 'cliente chega com dúvida',
+    erro: 'atendente sugere produto sem entender a necessidade',
+    area: 'Atendimento e vendas',
+    linhaPop: 'colaborativo',
+    conteudoGerado: {},
+  });
+  var okMat1 =
+    mat1.codigos_matriz_mae.indexOf('ATD-BA-01') >= 0 &&
+    (mat1.dominio || '').indexOf('atend') >= 0 &&
+    (mat1.padroes_relacionados || []).some(function (p) { return String(p).indexOf('ATD') >= 0; });
+
+  var pop1 = {
+    tipo: 'colaborativo',
+    titulo: 'Teste F4 balcão',
+    area: 'Atendimento e vendas',
+    processo: 'Atendimento',
+    conteudoJson: {
+      objetivo:
+        'Garantir atendimento seguro no balcão com escuta ativa e registo de exceções quando o cliente relatar sintoma ou pedir orientação fora do perfil OTC.',
+      regra_de_ouro: 'Em dúvida clínica ou legal, chamar farmacêutico antes de concluir o atendimento.',
+      procedimento: [
+        'Cumprimentar e repetir em voz audível o pedido ou a dúvida no balcão',
+        'Confirmar leitura da embalagem antes de explicar posologia de OTC',
+        'Registar no sistema qualquer exceção ou reclamação com data e responsável',
+      ],
+      como_fazer_bem:
+        'Olhar para o cliente ao falar · Perguntar antes de sugerir produto · Confirmar se entendeu o próximo passo · Encerrar dizendo o que vai acontecer a seguir',
+      erro_critico: 'Sugerir produto sem ouvir a necessidade completa no balcão.',
+      errosComuns: ['Prometer prazo sem consultar sistema', 'Ignorar fila sem aceno', 'Dispensar sem conferir identidade'],
+      pontosDeAtencao: ['Fila no rush', 'Cliente idoso', 'SKU em falta na gôndola'],
+      checklist_lider: ['Auditar 3 atendimentos por turno', 'Revisar registo de exceções', 'Confirmar leitura do POP na abertura'],
+      checklist: [
+        'Confirmar identidade do cliente antes de entregar medicamento controlado',
+        'Ler em voz alta o pedido e apontar o passo do POP em execução',
+        'Registar exceção com data, hora e nome do responsável no sistema',
+        'Medir tempo de espera quando há fila e acenar quem chegou por último',
+        'Chamar farmacêutico quando a dúvida exceder OTC ou houver risco clínico',
+      ],
+      treinamento: 'Roleplay de 10 min no balcão. Checklist de observação no piso com 3 itens sim/não.',
+      desvios: [
+        'Cliente sem identificação na retirada de controlado — recusar e chamar farmacêutico',
+        'Fila sem reconhecimento de quem espera mais tempo — corrigir na hora e anotar',
+        'Promessa de prazo sem verificação no sistema — cancelar promessa e informar cliente',
+      ],
+      metrica: 'Percentagem de atendimentos sem sugestão precoce (meta 90% por auditoria quinzenal)',
+    },
+  };
+  var itens1 = geradorConstruirItensAvaliaveisDaMatriz_(pop1, mat1);
+  pop1.conteudoJson.itens_avaliaveis = itens1;
+  var crivo1 = avaliarCrivoExecucaoPop_(pop1);
+  var score1 = calcularScoreExecucaoConceito_(itens1);
+  var morto1 = geradorValidarCamposEssenciaisFase4_(pop1);
+  var ok1 =
+    okMat1 &&
+    itens1.length >= 2 &&
+    morto1.ok &&
+    crivo1.status_crivo === 'aprovado_para_operacao' &&
+    score1 &&
+    score1.score_por_dimensao != null;
+
+  casos.push({
+    id: 1,
+    nome: 'balcão — matriz ATD, crivo e score',
+    ok: ok1,
+    det: { matriz: mat1.familia_prioritaria, crivo: crivo1.status_crivo },
+  });
+
+  var mat2 = geradorMapearMatrizConceito_({
+    processo: 'organização do salão',
+    situacao: 'corredor com caixa bloqueando passagem',
+    erro: 'cliente não consegue circular',
+    area: 'Loja e operação diária',
+    linhaPop: 'colaborativo',
+    conteudoGerado: {},
+  });
+  var okMat2 = mat2.familia_prioritaria === 'EST' || (mat2.codigos_matriz_mae || []).indexOf('EST-OR-01') >= 0;
+  var pop2 = JSON.parse(JSON.stringify(pop1));
+  pop2.conteudoJson.objetivo =
+    'Manter circulação segura no salão com passagens livres e sinalização adequada para o cliente.';
+  pop2.conteudoJson.erro_critico = 'Deixar caixa ou palete obstruindo passagem sem sinalização.';
+  var itens2 = geradorConstruirItensAvaliaveisDaMatriz_(pop2, mat2);
+  itens2[1].resultado = 'nao';
+  var score2 = calcularScoreExecucaoConceito_(itens2);
+  var ok2 = okMat2 && score2.falha_critica === true;
+
+  casos.push({
+    id: 2,
+    nome: 'estrutura — EST e falha crítica simulada',
+    ok: ok2,
+    det: { familia: mat2.familia_prioritaria, falha_critica: score2.falha_critica },
+  });
+
+  var pop3 = JSON.parse(JSON.stringify(pop1));
+  pop3.conteudoJson.objetivo = 'Situação: teste. Erro ou risco: x. Contexto operacional: y';
+  pop3.conteudoJson.checklist = ['a', 'b'];
+  var crivo3 = avaliarCrivoExecucaoPop_(pop3);
+  var ok3 = crivo3.status_crivo === 'reprovado_no_crivo' && (crivo3.bloqueadores || []).length >= 1;
+
+  casos.push({ id: 3, nome: 'caso ruim — crivo reprova', ok: ok3, det: { n: (crivo3.bloqueadores || []).length } });
+
+  var regOk = scoreSelfTestConceito_().ok && crivoSelfTestExecucaoPop_().ok;
+
+  return { ok: casos.every(function (c) { return c.ok; }) && regOk, casos: casos, regressao_global: regOk };
 }
 
 /**
