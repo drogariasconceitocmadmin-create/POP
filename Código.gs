@@ -4686,11 +4686,78 @@ function crivoSelfTestExecucaoPop_() {
 // Fase 4 — Gerador + Matriz_Mae (conceito) + Crivo + Score (integração incremental)
 // =============================================================================
 
-/** Catálogo conceitual alinhado ao motor de score; códigos estáveis para referência (não inventar fora daqui). */
+/** Enums oficiais base operacional (Fase 4 / itens avaliáveis). */
+function fase4EnumsTipoItem_() {
+  return [
+    'tempo',
+    'clareza',
+    'escuta',
+    'personalizacao',
+    'humanizacao',
+    'antecipacao',
+    'conducao',
+    'retorno',
+    'orientacao',
+    'fechamento',
+    'apresentacao',
+    'limpeza',
+    'organizacao',
+    'sinalizacao',
+    'conveniencia',
+    'seguranca',
+    'conformidade',
+  ];
+}
+function fase4EnumsCanalItem_() {
+  return ['presencial', 'telefone', 'whatsapp', 'entrega', 'estrutura_fisica'];
+}
+function fase4EnumsAplicabilidadeItem_() {
+  return [
+    'quando_houver_entrada_de_cliente',
+    'quando_houver_fluxo_no_salao',
+    'quando_houver_atendimento_no_balcao',
+    'quando_houver_receita',
+    'quando_houver_atendimento_farmaceutico',
+    'quando_houver_espera_ou_consulta_de_estoque',
+    'quando_houver_fechamento_de_venda',
+    'quando_houver_entrega_ou_retirada',
+    'quando_houver_contato_telefonico',
+    'quando_houver_contato_whatsapp',
+    'quando_houver_auditoria_estrutural',
+  ];
+}
+function fase4ItemEnumCamposOficiaisValidos_(item) {
+  if (!item || typeof item !== 'object') return false;
+  var t = fase4EnumsTipoItem_();
+  var c = fase4EnumsCanalItem_();
+  var a = fase4EnumsAplicabilidadeItem_();
+  if (t.indexOf(String(item.tipo || '')) < 0) return false;
+  if (c.indexOf(String(item.canal || '')) < 0) return false;
+  if (a.indexOf(String(item.aplicabilidade || '')) < 0) return false;
+  return true;
+}
+
+/** Cada item deve usar codigo (e codigo_matriz_mae) presentes em matrizRefs.codigos_matriz_mae; enums oficiais. */
+function fase4ValidarItensRastreioMatrizEEnums_(itens, matrizRefs) {
+  if (!Array.isArray(itens) || itens.length < 1) return false;
+  var list = (matrizRefs && matrizRefs.codigos_matriz_mae) || [];
+  for (var i = 0; i < itens.length; i++) {
+    var it = itens[i];
+    var cod = String((it && it.codigo) || '');
+    if (!cod || list.indexOf(cod) < 0) return false;
+    if (String((it && it.codigo_matriz_mae) || '') !== cod) return false;
+    if (!fase4ItemEnumCamposOficiaisValidos_(it)) return false;
+  }
+  return true;
+}
+
+/**
+ * Catálogo conceitual: códigos = identificadores oficiais da Matriz_Mae (não inventar fora do catálogo).
+ */
 function matrizMaeCatalogoConceito_() {
   return [
     {
-      codigo: 'ATD-BA-01',
+      codigo: 'ATD-001',
       familia: 'ATD',
       dominio: 'atendimento/balcão',
       gatilhos: ['atend', 'balc', 'cliente', 'dúvida', 'duvida', 'sugere', 'produto', 'necess', 'escuta', 'pergunta'],
@@ -4698,9 +4765,12 @@ function matrizMaeCatalogoConceito_() {
       dimensao: 'Escuta e orientação ao cliente',
       classificacao: 'Comunicação e escuta (Básico)',
       padrao: 'Confirmar a necessidade antes de sugerir produto no balcão',
+      fase4_tipo: 'escuta',
+      fase4_canal: 'presencial',
+      fase4_aplic: 'quando_houver_atendimento_no_balcao',
     },
     {
-      codigo: 'ATD-BA-02',
+      codigo: 'ATD-002',
       familia: 'ATD',
       dominio: 'atendimento/balcão',
       gatilhos: ['humaniz', 'tom', 'postura', 'cordial', 'acolh', 'olhar', 'fala'],
@@ -4708,9 +4778,12 @@ function matrizMaeCatalogoConceito_() {
       dimensao: 'Conduta e postura no atendimento',
       classificacao: 'Humanização observável (Básico)',
       padrao: 'Postura e linguagem alinhadas ao protocolo de acolhimento',
+      fase4_tipo: 'humanizacao',
+      fase4_canal: 'presencial',
+      fase4_aplic: 'quando_houver_atendimento_no_balcao',
     },
     {
-      codigo: 'ATD-SG-01',
+      codigo: 'ATD-015',
       familia: 'ATD',
       dominio: 'atendimento/balcão',
       gatilhos: ['segur', 'farmaceut', 'controlad', 'otc', 'orient'],
@@ -4718,9 +4791,12 @@ function matrizMaeCatalogoConceito_() {
       dimensao: 'Segurança do medicamento e encaminhamento',
       classificacao: 'Segurança operacional (Crítico)',
       padrao: 'Encaminhar ao farmacêutico quando a dúvida exceder OTC ou houver risco',
+      fase4_tipo: 'orientacao',
+      fase4_canal: 'presencial',
+      fase4_aplic: 'quando_houver_atendimento_farmaceutico',
     },
     {
-      codigo: 'EST-OR-01',
+      codigo: 'EST-001',
       familia: 'EST',
       dominio: 'estrutura/organização',
       gatilhos: ['organiz', 'salão', 'corredor', 'passagem', 'circular', 'caixa', 'bloque', 'gôndola', 'loja'],
@@ -4728,18 +4804,56 @@ function matrizMaeCatalogoConceito_() {
       dimensao: 'Circulação e organização do piso',
       classificacao: 'Conveniência e segurança de circulação (Básico)',
       padrao: 'Manter corredores e passagens livres para circulação segura do cliente',
+      fase4_tipo: 'organizacao',
+      fase4_canal: 'estrutura_fisica',
+      fase4_aplic: 'quando_houver_fluxo_no_salao',
     },
     {
-      codigo: 'EST-SG-01',
+      codigo: 'EST-002',
       familia: 'EST',
       dominio: 'estrutura/organização',
-      gatilhos: ['queda', 'acidente', 'atropel', 'emerg', 'evacu'],
+      gatilhos: ['queda', 'acidente', 'atropel', 'emerg', 'evacu', 'risco', 'tomb'],
       secao: 'Loja e operação diária',
       dimensao: 'Risco estrutural e emergência',
       classificacao: 'Segurança física (Crítico)',
       padrao: 'Eliminar ou sinalizar obstáculos com risco imediato de queda ou atropelamento',
+      fase4_tipo: 'seguranca',
+      fase4_canal: 'estrutura_fisica',
+      fase4_aplic: 'quando_houver_auditoria_estrutural',
     },
   ];
+}
+
+function matrizMaeRowPorCodigoF4_(cod) {
+  var c = String(cod || '').trim();
+  if (!c) return null;
+  var cat = matrizMaeCatalogoConceito_();
+  for (var i = 0; i < cat.length; i++) {
+    if (String(cat[i].codigo) === c) return cat[i];
+  }
+  return null;
+}
+
+/** Garante pelo menos dois códigos distintos da família mapeada para itens duplets. */
+function geradorCompletarCodigosMatrizMae_(codigos, familia) {
+  var out = (codigos || []).slice();
+  var fam = String(familia || '').toUpperCase();
+  var cat = matrizMaeCatalogoConceito_();
+  var famRows = cat.filter(function (r) {
+    return String(r.familia || '').toUpperCase() === fam;
+  });
+  var seen = {};
+  for (var i = 0; i < out.length; i++) {
+    seen[out[i]] = true;
+  }
+  for (var j = 0; j < famRows.length && out.length < 2; j++) {
+    var co = famRows[j].codigo;
+    if (!seen[co]) {
+      out.push(co);
+      seen[co] = true;
+    }
+  }
+  return out;
 }
 
 /**
@@ -4779,6 +4893,7 @@ function geradorMapearMatrizConceito_(contexto) {
     codigos.push(best.codigo);
     padroes.push(best.familia + ': ' + best.padrao);
   }
+  codigos = geradorCompletarCodigosMatrizMae_(codigos, best.familia);
   return {
     dominio: best.dominio,
     secao_sugerida: best.secao,
@@ -4870,34 +4985,56 @@ function geradorEnriquecerConteudoColaborativoMinimoCrivo_(cj, contract, situaca
 }
 
 /**
- * Itens no formato do score + metadados + chaves compatíveis com o crivo (comportamento / critérios).
+ * Itens no formato do score; codigo = codigo_matriz_mae (códigos do mapeamento, sem sufixos artificiais).
  */
 function geradorConstruirItensAvaliaveisDaMatriz_(pop, matrizRefs) {
   var refs = matrizRefs || {};
-  var cj = (pop && pop.conteudoJson) || {};
-  var fam = String(refs.familia_prioritaria || '').toUpperCase();
-  var sec = String(refs.secao_sugerida || 'Atendimento no balcão de medicamentos');
-  var dimA = String(refs.dimensao_sugerida || 'Escuta e orientação ao cliente');
-  var dimB = String(refs.dimensao_sugerida || 'Conduta no piso');
-  var clsA = String(refs.classificacao_sugerida || 'Comunicação e escuta (Básico)');
-  var clsB = 'Verificação operacional (Básico)';
+  var codLista = geradorCompletarCodigosMatrizMae_(refs.codigos_matriz_mae || [], refs.familia_prioritaria);
+  var c1 = codLista.length > 0 ? String(codLista[0]) : '';
+  var c2 = codLista.length > 1 ? String(codLista[1]) : c1;
+  var r1 = matrizMaeRowPorCodigoF4_(c1);
+  var r2 = matrizMaeRowPorCodigoF4_(c2);
+  if (!r1) {
+    var cat0 = matrizMaeCatalogoConceito_();
+    r1 = cat0[0];
+    c1 = r1.codigo;
+  }
+  if (!r2) r2 = r1;
+  c2 = r2.codigo;
+  if (c1 === c2 && codLista.length > 1) {
+    r2 = matrizMaeRowPorCodigoF4_(String(codLista[1])) || r1;
+    c2 = r2.codigo;
+  }
+  if (c1 === c2) {
+    var cat = matrizMaeCatalogoConceito_();
+    for (var z = 0; z < cat.length; z++) {
+      if (String(cat[z].codigo) !== c1) {
+        r2 = cat[z];
+        c2 = r2.codigo;
+        break;
+      }
+    }
+  }
+
   var out = [];
-  function pushItem(cod, dim, cls, grav, comp, cap, cre, tipo, canal, aplic) {
+  function pushDeRow(row, grav, comp, cap, cre) {
+    var codM = String(row.codigo);
     out.push({
-      codigo: cod,
-      secao: sec,
-      dimensao: dim,
-      classificacao: cls,
-      tipo: tipo || 'colaborativo',
-      canal: canal || 'piso',
-      aplicabilidade: aplic || 'operacao_diaria',
+      codigo: codM,
+      codigo_matriz_mae: codM,
+      secao: row.secao,
+      dimensao: row.dimensao,
+      classificacao: row.classificacao,
+      tipo: String(row.fase4_tipo),
+      canal: String(row.fase4_canal),
+      aplicabilidade: String(row.fase4_aplic),
       padrao: comp,
       evidencia_minima: 'Registo em checklist de piso ou evidência equivalente',
       gravidade: grav,
       resultado: '',
       pontuacao: '',
       observacoes: '',
-      acao_corretiva_padrao: scoreConceitoAcaoCorretivaPadraoPorCodigo_(cod),
+      acao_corretiva_padrao: scoreConceitoAcaoCorretivaPadraoPorCodigo_(codM),
       responsavel_correcao: '',
       prazo_correcao: '',
       status_correcao: 'pendente_avaliacao',
@@ -4907,55 +5044,35 @@ function geradorConstruirItensAvaliaveisDaMatriz_(pop, matrizRefs) {
       criterio_reprovacao: cre,
     });
   }
-  if (fam === 'EST') {
-    pushItem(
-      'EST-OP-01',
-      dimA,
-      clsA,
+  if (String(refs.familia_prioritaria || '').toUpperCase() === 'EST') {
+    pushDeRow(
+      r1,
       'normal',
       'Corredor e passagem permanecem livres para circulação do cliente sem obstrução de caixas ou paletes',
       'Área de passagem verificada sem bloqueio acima do limite definido pela loja',
       'Obstáculo fixo ou temporário impede circulação segura ou força desvio em área de risco',
-      'colaborativo',
-      'loja',
-      'organizacao',
     );
-    pushItem(
-      'EST-SG-02',
-      'Risco e segurança no piso',
-      'Segurança física (Crítico)',
+    pushDeRow(
+      r2,
       'critica',
       'Obstáculo com risco de queda ou atropelamento é sinalizado e removido ou isolado no mesmo turno',
       'Isolamento ou remoção registrada com responsável e prazo',
       'Obstáculo permanece sem sinalização ou sem ação no prazo',
-      'colaborativo',
-      'loja',
-      'seguranca',
     );
   } else {
-    pushItem(
-      'ATD-EX-01',
-      dimA,
-      clsA,
+    pushDeRow(
+      r1,
       'normal',
       'Colaborador confirma a necessidade ou a dúvida do cliente antes de sugerir produto no balcão',
       'Repetição ou confirmação da necessidade em voz audível ou registo no fluxo do balcão',
       'Sugestão de produto sem confirmação prévia da necessidade',
-      'colaborativo',
-      'balcão',
-      'atendimento',
     );
-    pushItem(
-      'ATD-EX-02',
-      'Conduta e escuta',
-      'Humanização observável (Básico)',
+    pushDeRow(
+      r2,
       'normal',
       'Registo de exceção quando a orientação sair do perfil OTC ou houver risco clínico',
       'Exceção com data, hora e responsável no sistema ou livro definido',
       'Seguimento sem registo quando a exceção exigir rastreio',
-      'colaborativo',
-      'balcão',
-      'atendimento',
     );
   }
   return out;
@@ -5024,7 +5141,8 @@ function geradorIntegrarFase4PosNormalizacao_(user, requestId, normalized, contr
     out.message = 'Payload inválido para Fase 4';
     return out;
   }
-  if (normalizeTipoPop_(normalized.tipo) !== 'colaborativo') {
+  var tPopF4 = normalizeTipoPop_(normalized.tipo);
+  if (tPopF4 !== 'colaborativo' && tPopF4 !== 'critico') {
     return out;
   }
   var cj = normalized.conteudoJson || {};
@@ -5075,21 +5193,26 @@ function geradorIntegrarFase4PosNormalizacao_(user, requestId, normalized, contr
 }
 
 /**
- * Self-test Fase 4 (sem OpenAI): matriz, itens, crivo, campos e score.
+ * Self-test Fase 4 (sem OpenAI): matriz, itens, crivo, campos, score, rastreio e enums.
  */
 function fase4SelfTestGeradorMatrizCrivoScore_() {
   var casos = [];
-
-  var mat1 = geradorMapearMatrizConceito_({
+  var ctxAt = {
     processo: 'atendimento no balcão',
     situacao: 'cliente chega com dúvida',
     erro: 'atendente sugere produto sem entender a necessidade',
+  };
+
+  var mat1 = geradorMapearMatrizConceito_({
+    processo: ctxAt.processo,
+    situacao: ctxAt.situacao,
+    erro: ctxAt.erro,
     area: 'Atendimento e vendas',
     linhaPop: 'colaborativo',
     conteudoGerado: {},
   });
   var okMat1 =
-    mat1.codigos_matriz_mae.indexOf('ATD-BA-01') >= 0 &&
+    (mat1.codigos_matriz_mae || []).indexOf('ATD-001') >= 0 &&
     (mat1.dominio || '').indexOf('atend') >= 0 &&
     (mat1.padroes_relacionados || []).some(function (p) { return String(p).indexOf('ATD') >= 0; });
 
@@ -5134,19 +5257,48 @@ function fase4SelfTestGeradorMatrizCrivoScore_() {
   var crivo1 = avaliarCrivoExecucaoPop_(pop1);
   var score1 = calcularScoreExecucaoConceito_(itens1);
   var morto1 = geradorValidarCamposEssenciaisFase4_(pop1);
+  var okTraceEnums = fase4ValidarItensRastreioMatrizEEnums_(itens1, mat1);
   var ok1 =
     okMat1 &&
     itens1.length >= 2 &&
     morto1.ok &&
     crivo1.status_crivo === 'aprovado_para_operacao' &&
     score1 &&
-    score1.score_por_dimensao != null;
+    score1.score_por_dimensao != null &&
+    okTraceEnums;
 
   casos.push({
     id: 1,
-    nome: 'balcão — matriz ATD, crivo e score',
+    nome: 'colaborativo — balcão ATD, crivo, score, rastreio',
     ok: ok1,
-    det: { matriz: mat1.familia_prioritaria, crivo: crivo1.status_crivo },
+    det: { matriz: mat1.familia_prioritaria, crivo: crivo1.status_crivo, cod: mat1.codigos_matriz_mae },
+  });
+
+  var pop4 = JSON.parse(JSON.stringify(pop1));
+  pop4.tipo = 'critico';
+  pop4.criticidade = 'alta';
+  var f4c = geradorIntegrarFase4PosNormalizacao_(
+    { id: 'selftest' },
+    'f4st',
+    pop4,
+    {},
+    ctxAt.processo,
+    ctxAt.situacao,
+    ctxAt.erro,
+    'critico',
+  );
+  var ok4 =
+    f4c.ok === true &&
+    f4c.crivo != null &&
+    f4c.score_conceito != null &&
+    pop4.conteudoJson.fase4_score_conceito != null &&
+    geradorValidarCamposEssenciaisFase4_(pop4).ok;
+
+  casos.push({
+    id: 2,
+    nome: 'crítico — integração Fase 4 (matriz, crivo, score)',
+    ok: ok4,
+    det: { status: f4c.crivo && f4c.crivo.status_crivo, familia: f4c.matriz && f4c.matriz.familia_prioritaria },
   });
 
   var mat2 = geradorMapearMatrizConceito_({
@@ -5157,7 +5309,7 @@ function fase4SelfTestGeradorMatrizCrivoScore_() {
     linhaPop: 'colaborativo',
     conteudoGerado: {},
   });
-  var okMat2 = mat2.familia_prioritaria === 'EST' || (mat2.codigos_matriz_mae || []).indexOf('EST-OR-01') >= 0;
+  var okMat2 = mat2.familia_prioritaria === 'EST' || (mat2.codigos_matriz_mae || []).indexOf('EST-001') >= 0;
   var pop2 = JSON.parse(JSON.stringify(pop1));
   pop2.conteudoJson.objetivo =
     'Manter circulação segura no salão com passagens livres e sinalização adequada para o cliente.';
@@ -5165,13 +5317,13 @@ function fase4SelfTestGeradorMatrizCrivoScore_() {
   var itens2 = geradorConstruirItensAvaliaveisDaMatriz_(pop2, mat2);
   itens2[1].resultado = 'nao';
   var score2 = calcularScoreExecucaoConceito_(itens2);
-  var ok2 = okMat2 && score2.falha_critica === true;
+  var ok2 = okMat2 && score2.falha_critica === true && fase4ValidarItensRastreioMatrizEEnums_(itens2, mat2);
 
   casos.push({
-    id: 2,
-    nome: 'estrutura — EST e falha crítica simulada',
+    id: 3,
+    nome: 'estrutura — EST, falha crítica, rastreio',
     ok: ok2,
-    det: { familia: mat2.familia_prioritaria, falha_critica: score2.falha_critica },
+    det: { familia: mat2.familia_prioritaria, falha_critica: score2.falha_critica, cod: mat2.codigos_matriz_mae },
   });
 
   var pop3 = JSON.parse(JSON.stringify(pop1));
@@ -5180,7 +5332,15 @@ function fase4SelfTestGeradorMatrizCrivoScore_() {
   var crivo3 = avaliarCrivoExecucaoPop_(pop3);
   var ok3 = crivo3.status_crivo === 'reprovado_no_crivo' && (crivo3.bloqueadores || []).length >= 1;
 
-  casos.push({ id: 3, nome: 'caso ruim — crivo reprova', ok: ok3, det: { n: (crivo3.bloqueadores || []).length } });
+  casos.push({ id: 4, nome: 'caso ruim — crivo reprova', ok: ok3, det: { n: (crivo3.bloqueadores || []).length } });
+
+  var ok5 = okTraceEnums;
+  casos.push({ id: 5, nome: 'códigos e codigo_matriz_mae rastreáveis', ok: ok5, det: {} });
+
+  var ok6 = itens1.every(function (it) {
+    return fase4ItemEnumCamposOficiaisValidos_(it);
+  });
+  casos.push({ id: 6, nome: 'enums oficiais tipo/canal/aplicabilidade', ok: ok6, det: {} });
 
   var regOk = scoreSelfTestConceito_().ok && crivoSelfTestExecucaoPop_().ok;
 
