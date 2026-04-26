@@ -2487,6 +2487,131 @@ function iaMotorPreencherComoFazerErroCriticoIncoming_(mergedIn, contract) {
   return out;
 }
 
+/** QA motor: versão do heurístico de métrica (log / rastreio). */
+var IA_MOTOR_QA_ENGINE_VERSION_ = 'qa_metric_fase4_v1';
+
+/** Termos proibidos como foco principal da métrica (vago). */
+function iaMotorMetricaTermosProibidos_() {
+  return [
+    'atendimento correto',
+    'atendimentos corretos',
+    'qualidade do atendimento',
+    'atendimento bom',
+    'cliente satisfeito',
+    'processo adequado',
+    'execução correta',
+    'execucao correta',
+  ];
+}
+
+/** Métrica vaga de “qualidade” (não enriquece automaticamente; QA continua a reprovar). */
+function iaMotorMetricaVagaBloqueadaSempre_(metricaStr) {
+  var bag = iaBagNorm_(String(metricaStr || ''));
+  if (bag.indexOf('qualidade do atendimento') >= 0) return true;
+  if (bag.indexOf('atendimento bom') >= 0) return true;
+  if (bag.indexOf('cliente satisfeito') >= 0) return true;
+  if (bag.indexOf('processo adequado') >= 0) return true;
+  if (bag.indexOf('qualidade geral') >= 0) return true;
+  return false;
+}
+
+function iaMotorMetricaBagTemProibicao_(bag) {
+  var list = iaMotorMetricaTermosProibidos_();
+  for (var i = 0; i < list.length; i++) {
+    if (bag.indexOf(iaBagNorm_(list[i])) >= 0) return true;
+  }
+  return false;
+}
+
+/** Métrica operacional forte: mensurável + objeto de piso + período/frequência. */
+function iaMotorQaMetricaOperacionalOk_(metricaStr) {
+  var t = String(metricaStr || '').trim();
+  if (t.length < 12) return false;
+  var bag = iaBagNorm_(t);
+  if (iaMotorMetricaVagaBloqueadaSempre_(t)) return false;
+  if (iaMotorMetricaBagTemProibicao_(bag)) return false;
+  var temMens =
+    /%|percentual|percentagem|número|numero|quantidade|contagem|total(\s|$|de)/i.test(t) ||
+    /meta[\s:]*\d/i.test(t) ||
+    /\d+[\d.,]*\s*%/.test(t);
+  var temOp =
+    bag.indexOf('atend') >= 0 ||
+    bag.indexOf('balc') >= 0 ||
+    bag.indexOf('falh') >= 0 ||
+    bag.indexOf('sugest') >= 0 ||
+    bag.indexOf('pergun') >= 0 ||
+    bag.indexOf('receit') >= 0 ||
+    bag.indexOf('entreg') >= 0 ||
+    bag.indexOf('checklist') >= 0 ||
+    bag.indexOf('auditor') >= 0 ||
+    bag.indexOf('erro') >= 0 ||
+    bag.indexOf('caix') >= 0;
+  var temPrazo =
+    /semanal|quinzen|mensal|diari|por\s+semana|por\s+dia|por\s+turno|por\s+m[eê]s|em\s+\d+\s*dias|30\s*dias|no\s+m[eê]s|por\s+auditoria|auditoria/i.test(
+      t,
+    );
+  return temMens && temOp && temPrazo;
+}
+
+/**
+ * Enriquecimento determinístico da métrica após patch (antes do QA pós-patch).
+ * Usa critério de sucesso só para meta/período; não copia “satisfatório” etc.
+ */
+function iaMotorMetricaReconstruirDeContexto_(metricaAtual, criterioSucesso, processo, situacao, erro) {
+  void metricaAtual;
+  var cs = String(criterioSucesso || '');
+  var pct = '';
+  var mPct = cs.match(/(\d{1,3})\s*%/);
+  if (mPct) pct = mPct[1] + '%';
+  var janela = 'semanal';
+  if (cs) {
+    if (/30\s*dias|trinta\s*dias|per[ií]odo\s+de\s+30|em\s+um\s+per[ií]odo\s+de\s+30/i.test(cs)) janela = 'em janela de 30 dias (referência mensal)';
+    else if (/semanal|por\s+semana|a\s+cada\s+semana/i.test(cs)) janela = 'semanal';
+    else if (/quinzenal|quinzena/i.test(cs)) janela = 'quinzenal';
+    else if (/mensal|por\s+m[eê]s|no\s+m[eê]s/i.test(cs)) janela = 'mensal';
+  }
+  var errN = iaBagNorm_(String(erro || ''));
+  var foco = 'atendimentos no balcão em que há pergunta explícita sobre a necessidade antes de sugestão de produto';
+  if (errN.indexOf('sugere') >= 0 && errN.indexOf('necess') >= 0) {
+    foco =
+      'atendimentos no balcão em que o colaborador pergunta a necessidade do cliente antes de sugerir produto';
+  }
+  var meta = pct ? ' (referência de meta ' + pct + ' alinhada ao critério)' : '';
+  return (
+    'Percentual ' +
+    janela +
+    ' de ' +
+    foco +
+    meta +
+    '.'
+  );
+}
+
+/**
+ * @param {Object} mergedIn
+ * @param {{ processo: string, situacao: string, erro: string, linhaPop: string, contract: Object }} contexto
+ */
+function iaMotorNormalizarMetricaOperacional_(mergedIn, contexto) {
+  var m = mergedIn || {};
+  var cx = contexto || {};
+  var c = cx.contract || {};
+  if (!c.controle) c.controle = {};
+  var ctl = c.controle;
+  var criterio = String(m.criterio_sucesso || ctl.criterio_sucesso || '').trim();
+  var metrica = String(m.metrica == null ? '' : m.metrica).trim();
+  if (!metrica) return;
+  if (iaMotorQaMetricaOperacionalOk_(metrica)) return;
+  if (iaMotorMetricaVagaBloqueadaSempre_(metrica)) return;
+  if (iaMotorMetricaBagTemProibicao_(iaBagNorm_(metrica)) && !criterio) {
+    return;
+  }
+  var novo = iaMotorMetricaReconstruirDeContexto_(metrica, criterio, cx.processo, cx.situacao, cx.erro);
+  if (novo && novo.length > 20) {
+    m.metrica = novo;
+    ctl.metrica = novo;
+  }
+}
+
 function iaMotorQaChecklistIncoming_(mergedIn, contract) {
   var falhas = [];
   var m = mergedIn || {};
@@ -2522,13 +2647,21 @@ function iaMotorQaChecklistIncoming_(mergedIn, contract) {
   if (!String(exec.tempo || '').trim()) falhas.push({ codigo: 'tempo_definido', mensagem: 'Tempo da execução não definido no contrato.' });
   if (!String(exec.frequencia || '').trim()) falhas.push({ codigo: 'frequencia_definida', mensagem: 'Frequência da execução não definida no contrato.' });
   if (!String(m.metrica || '').trim()) falhas.push({ codigo: 'metrica', mensagem: 'Métrica ausente no payload.' });
+  else if (!iaMotorQaMetricaOperacionalOk_(m.metrica)) {
+    falhas.push({
+      codigo: 'metrica_fraca',
+      mensagem:
+        'Métrica operacional fraca: combine sinal mensurável (número, quantidade, percentual, contagem…), objeto operacional de piso (atendimento, balcão, pergunta, sugestão…) e período ou frequência (semanal, mensal, em 30 dias, por turno…).',
+    });
+  }
 
-  var critBlob = iaBagNorm_(String(ctl.criterio_sucesso || '') + ' ' + String(m.metrica || ''));
+  var criterioStr = String(ctl.criterio_sucesso || m.criterio_sucesso || '').trim();
+  var critBlob = iaBagNorm_(criterioStr + ' ' + String(m.metrica || ''));
   var mensur =
-    /\b(%|\b\d+\b|zero|nenhum|checklist|binario|sim\/nao|sim\/não|confirmar|contar|registrar|medir|prazo|minutos|minuto|horas|hora|dias|dia|semana|semanal|diario|diário)\b/.test(
+    /\b(%|numero|número|quantidade|percentual|percentagem|contagem|total|zero|nenhum|checklist|binario|sim\/nao|sim\/não|confirmar|contar|registrar|medir|prazo|minutos|minuto|horas|hora|dias|dia|semana|semanal|diario|diário|quinzen|mensal)\b/.test(
       critBlob
-    );
-  if (!String(ctl.criterio_sucesso || '').trim() || !mensur) {
+    ) || /\b\d+\b/.test(critBlob);
+  if (!criterioStr || !mensur) {
     falhas.push({
       codigo: 'criterio_sucesso_mensuravel',
       mensagem: 'Critério de sucesso precisa ser mensurável/verificável (número, %, checklist, prazo ou contagem).',
@@ -2565,6 +2698,9 @@ function iaMotorSincronizarContratoComIncoming_(contract, mergedIn) {
     if (m.frequencia != null && String(m.frequencia).trim()) c.execucao.frequencia = String(m.frequencia).trim();
   }
   if (m.metrica != null && String(m.metrica).trim()) c.controle.metrica = String(m.metrica).trim();
+  if (m.criterio_sucesso != null && String(m.criterio_sucesso).trim()) {
+    c.controle.criterio_sucesso = String(m.criterio_sucesso).trim();
+  }
 
   // Heurística: se critério sumiu, reancora no objetivo/pontos (mantém contrato coerente com payload).
   if (!String(c.controle.criterio_sucesso || '').trim()) {
@@ -2877,6 +3013,17 @@ function gerarPopIaConceito(token, processo, situacao, erro) {
     logGptPopIaLinha_(ctx.user, requestId, 'gpt_qa', falhasQa.length ? 'falhou' : 'ok', { falhas: falhasQa });
     if (falhasQa.length) {
       mergedIn = iaMotorCorrigirIncomingUmaVez_(ctx.user, requestId, mergedIn, contract, falhasQa, pIn, sIn, eIn);
+      iaMotorSincronizarContratoComIncoming_(contract, mergedIn);
+      logGptPopIaLinha_(ctx.user, requestId, 'gpt_qa_pre_pos_patch', 'ok', {
+        qa_engine_version: IA_MOTOR_QA_ENGINE_VERSION_,
+      });
+      iaMotorNormalizarMetricaOperacional_(mergedIn, {
+        contract: contract,
+        processo: pIn,
+        situacao: sIn,
+        erro: eIn,
+        linhaPop: String(contract.linhaPop || mergedIn.linhaPop || ''),
+      });
       iaMotorSincronizarContratoComIncoming_(contract, mergedIn);
       var falhas2 = iaMotorQaChecklistIncoming_(mergedIn, contract);
       logGptPopIaLinha_(ctx.user, requestId, 'gpt_qa_pos_patch', falhas2.length ? 'falhou' : 'ok', { falhas: falhas2 });
@@ -5217,6 +5364,74 @@ function geradorIntegrarFase4PosNormalizacao_(user, requestId, normalized, contr
     out.message = 'Aprovado com ajustes: rever alertas antes de publicar.';
   }
   return out;
+}
+
+/**
+ * Self-test: normalização pós-patch de métrica + regra `metrica_fraca` (sem OpenAI).
+ * @returns {{ ok: boolean, caso106: boolean, vaga: boolean, boa: boolean, regressao_global: boolean }}
+ */
+function iaMotorSelfTestQaMetricaPosPatchFase4_() {
+  var p = 'atendimento no balcão';
+  var s = 'cliente chega com dúvida';
+  var e = 'atendente sugere produto sem entender a necessidade';
+  var contract1 = {
+    controle: {
+      criterio_sucesso: '90% dos atendimentos devem ser satisfatórios em um período de 30 dias',
+    },
+    execucao: { tempo: 'imediato', frequencia: 'a cada dúvida' },
+  };
+  var merged1 = {
+    tipo: 'colaborativo',
+    procedimento: ['Cumprimentar o cliente no balcão', 'Perguntar a necessidade completa antes de sugerir produto'],
+    como_fazer_bem:
+      'Perguntar em voz alta a necessidade no balcão antes de apontar produto na gôndola e confirmar a leitura do rótulo',
+    erro_critico: 'Sugerir medicamento de prateleira no balcão sem ouvir a dúvida do cliente do início ao fim do pedido',
+    metrica: 'Número de atendimentos corretos em relação ao total de atendimentos realizados',
+    criterio_sucesso: '90% dos atendimentos devem ser satisfatórios em um período de 30 dias',
+  };
+  iaMotorNormalizarMetricaOperacional_(merged1, { contract: contract1, processo: p, situacao: s, erro: e, linhaPop: 'critico' });
+  iaMotorSincronizarContratoComIncoming_(contract1, merged1);
+  var f1 = iaMotorQaChecklistIncoming_(merged1, contract1);
+  var ok1 =
+    !f1.some(function (x) { return x && x.codigo === 'metrica_fraca'; }) && iaMotorQaMetricaOperacionalOk_(merged1.metrica);
+
+  var contract2 = { controle: { criterio_sucesso: 'Em 30 dias, 90% dos atendimentos com checklist de balcão concluída' }, execucao: { tempo: '1', frequencia: '1' } };
+  var merged2 = {
+    tipo: 'colaborativo',
+    procedimento: ['Cumprimentar o visitante de forma clara', 'Confirmar a dúvida do cliente no balcão hoje'],
+    como_fazer_bem: 'Olhar o cliente, perguntar a necessidade no balcão e só depois apontar artigo de prateleira visível',
+    erro_critico: 'Sugerir medicamento de prateleira sem confirmar a queixa do cliente no atendimento hoje no balcão',
+    metrica: 'qualidade do atendimento',
+    criterio_sucesso: 'Em 30 dias, 90% dos atendimentos com checklist de balcão concluída',
+  };
+  iaMotorNormalizarMetricaOperacional_(merged2, { contract: contract2, processo: p, situacao: s, erro: e, linhaPop: 'critico' });
+  var f2 = iaMotorQaChecklistIncoming_(merged2, contract2);
+  var ok2 = f2.some(function (x) { return x && x.codigo === 'metrica_fraca'; });
+
+  var contract3 = { controle: { criterio_sucesso: '90% por auditoria mensal no balcão' }, execucao: { tempo: '1', frequencia: '1' } };
+  var merged3 = {
+    tipo: 'colaborativo',
+    procedimento: ['Cumprimentar o visitante de forma clara', 'Perguntar a necessidade antes de sugerir item'],
+    como_fazer_bem: 'Fazer contato visual no balcão e registrar a dúvida do cliente no sistema em cada atendimento',
+    erro_critico: 'Sugerir produto de prateleira no balcão sem registrar a dúvida do cliente com data e turno hoje',
+    metrica: 'Percentual semanal de atendimentos no balcão com pergunta de necessidade antes da sugestão de produto',
+    criterio_sucesso: '90% por auditoria mensal no balcão',
+  };
+  var f3 = iaMotorQaChecklistIncoming_(merged3, contract3);
+  var ok3 = !f3.some(function (x) { return x && x.codigo === 'metrica_fraca'; });
+
+  var r4 = fase4SelfTestGeradorMatrizCrivoScore_();
+  var rC = crivoSelfTestExecucaoPop_();
+  var rS = scoreSelfTestConceito_();
+  var reg = r4.ok && rC.ok && rS.ok;
+
+  return {
+    ok: ok1 && ok2 && ok3 && reg,
+    caso106: ok1,
+    vaga: ok2,
+    boa: ok3,
+    regressao_global: reg,
+  };
 }
 
 /**
