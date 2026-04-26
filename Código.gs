@@ -4125,9 +4125,22 @@ function crivoTextoTemHumanizacaoObservavel_(texto) {
     'adaptar a fala',
     'adaptar fala',
     'nao fazer o cliente repetir',
+    'evitar que o cliente repita',
     'antecipar',
     'encerrar com clareza',
+    'encerrar dizendo',
     'seguranca no encerramento',
+    'olhar para o cliente',
+    'perguntar a necessidade',
+    'perguntar antes de sugerir',
+    'confirmar entendimento',
+    'confirmar informacao',
+    'confirmar se entendeu',
+    'informar o proximo passo',
+    'informar proximo passo',
+    'ouvir sem interromper',
+    'nao interromper',
+    'encaminhar ao farmaceutico quando necessario',
   ];
   var n = 0;
   for (var j = 0; j < sinais.length; j++) {
@@ -4144,14 +4157,20 @@ function crivoObjetivoContaminadoBriefing_(objetivo) {
 function crivoContarPartesPraticas_(texto, minPartes) {
   var s = String(texto || '').trim();
   if (!s) return 0;
-  var parts = s.split(/\n+|(?:\s*[·•]\s*)|(?:\s*;\s*)|(?:\d+[\.)]\s+)/g).filter(function (x) {
-    return String(x).trim().length >= 12;
-  });
-  return parts.length >= minPartes ? parts.length : parts.length;
+  var raw = s.split(/\n+|(?:\s*[·•]\s*)|(?:\s*;\s*)|(?:\d+[\.)]\s*)|(?:\.\s+)/g);
+  var n = 0;
+  for (var p = 0; p < raw.length; p++) {
+    var t = String(raw[p] == null ? '' : raw[p]).trim();
+    if (t.length < 12) continue;
+    if (crivoTextoTemFraseVaga_(t)) continue;
+    n++;
+  }
+  return n;
 }
 
-function crivoChecklistFraco_(arr) {
-  if (!Array.isArray(arr) || arr.length < 5) return true;
+function crivoChecklistFraco_(arr, minItens) {
+  var min = minItens == null || minItens === undefined ? 5 : minItens;
+  if (!Array.isArray(arr) || arr.length < min) return true;
   var curtas = 0;
   for (var i = 0; i < arr.length; i++) {
     var u = String(arr[i] == null ? '' : arr[i]).trim();
@@ -4298,10 +4317,10 @@ function avaliarCrivoExecucaoPop_(pop) {
     addBloq('objetivo_contaminado_briefing', 'Objetivo mistura briefing/contexto (Situação/Erro/Exemplo)', String(objetivo).slice(0, 200));
   }
 
-  if (crivoChecklistFraco_(chk)) {
+  if (crivoChecklistFraco_(chk, 5)) {
     addBloq('checklist_operacional_fraco', 'Checklist operacional abaixo do mínimo ou etapas muito fracas', 'checklist.length=' + (Array.isArray(chk) ? chk.length : 0));
   }
-  if (!Array.isArray(chkL) || chkL.length < 3 || crivoChecklistFraco_(chkL)) {
+  if (!Array.isArray(chkL) || chkL.length < 3 || crivoChecklistFraco_(chkL, 3)) {
     addBloq('checklist_lider_fraco', 'Checklist do líder abaixo do mínimo ou muito vago', 'checklist_lider');
   }
 
@@ -4552,6 +4571,32 @@ function crivoSelfTestExecucaoPop_() {
   var r8 = avaliarCrivoExecucaoPop_(p8);
   var ok8 = r8.status_crivo === 'aprovado_com_ajuste' && r8.aprovado_com_ajuste === true && r8.bloqueado === false;
   casos.push({ id: 8, nome: 'POP bom com ajuste leve', ok: ok8, det: r8.alertas.length });
+
+  var p9 = basePop();
+  p9.conteudoJson.treinamento =
+    'Simular atendimento com cliente em dúvida. Observar atendimento real no balcão e corrigir sugestão precoce no turno.';
+  var r9 = avaliarCrivoExecucaoPop_(p9);
+  var ok9 = r9.status_crivo === 'aprovado_para_operacao' && r9.bloqueado === false;
+  casos.push({ id: 9, nome: 'treinamento: duas ações (ponto final)', ok: ok9, det: r9.status_crivo });
+
+  var p10 = basePop();
+  p10.conteudoJson.treinamento = 'Orientar equipe. Reforçar atendimento.';
+  var r10 = avaliarCrivoExecucaoPop_(p10);
+  var ok10 =
+    r10.status_crivo === 'reprovado_no_crivo' &&
+    r10.bloqueadores.some(function (b) { return b.codigo === 'treinamento_insuficiente'; });
+  casos.push({ id: 10, nome: 'treinamento: parte vaga não conta', ok: ok10 });
+
+  var p11 = basePop();
+  p11.conteudoJson.checklist = [
+    'Item operacional A com conteúdo mínimo exigido para o crivo',
+    'Item operacional B com conteúdo mínimo exigido para o crivo',
+    'Item operacional C com conteúdo mínimo exigido para o crivo',
+    'Item operacional D com conteúdo mínimo exigido para o crivo',
+  ];
+  var r11 = avaliarCrivoExecucaoPop_(p11);
+  var ok11 = r11.status_crivo === 'reprovado_no_crivo' && r11.bloqueadores.some(function (b) { return b.codigo === 'checklist_operacional_fraco'; });
+  casos.push({ id: 11, nome: 'checklist operacional: mínimo 5', ok: ok11 });
 
   var allOk = casos.every(function (c) {
     return c.ok;
