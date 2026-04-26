@@ -4239,6 +4239,61 @@ function crivoAvaliarItensAvaliaveis_(itens) {
 }
 
 /**
+ * Métrica com indícios de auditabilidade: mensuração + referência de meta/prazo + contexto operacional.
+ * Rejeita frases vagas conhecidas; não substitui julgamento humano no crivo.
+ */
+function crivoMetricaAuditavelCrivo_(met) {
+  var t = String(met == null ? '' : met).trim();
+  if (t.length < 20) return false;
+  var bag = iaBagNorm_(t);
+  var vaga = [
+    'atendimento correto',
+    'qualidade do atendimento',
+    'executar bem',
+    'melhorar atendimento',
+    'processo adequado',
+  ];
+  for (var i = 0; i < vaga.length; i++) {
+    if (bag.indexOf(iaBagNorm_(vaga[i])) >= 0) return false;
+  }
+
+  var temMensuracao =
+    bag.indexOf('percentagem') >= 0 ||
+    bag.indexOf('percentual') >= 0 ||
+    bag.indexOf('quantidade') >= 0 ||
+    bag.indexOf('contagem') >= 0 ||
+    (bag.indexOf('numero') >= 0 && bag.indexOf('de') >= 0) ||
+    bag.indexOf('total de') >= 0 ||
+    t.indexOf('%') >= 0 ||
+    /meta[\s:]*\d/.test(t);
+
+  var temMetaPrazoOuAuditoria =
+    bag.indexOf('meta') >= 0 ||
+    /quinzen|seman|mensal|diari(amente)?|bimensal|trimestr|anual|frequ(ê|e)ncia|semestre|hora|horas|semana|semanas|dias?|turno|turnos|prazo|auditori|audita/i.test(
+      t,
+    ) ||
+    /por\s+(\d|semana|dia|dias|turno|m[eê]s|quinzena|auditoria)/i.test(t);
+
+  var temContextoMensuravel =
+    bag.indexOf('atend') >= 0 ||
+    bag.indexOf('falh') >= 0 ||
+    bag.indexOf('erro') >= 0 ||
+    bag.indexOf('checklist') >= 0 ||
+    bag.indexOf('vend') >= 0 ||
+    bag.indexOf('entreg') >= 0 ||
+    bag.indexOf('caix') >= 0 ||
+    bag.indexOf('pedid') >= 0 ||
+    bag.indexOf('diverg') >= 0 ||
+    bag.indexOf('confer') >= 0 ||
+    bag.indexOf('balc') >= 0 ||
+    bag.indexOf('conforme') >= 0 ||
+    bag.indexOf('medicament') >= 0 ||
+    bag.indexOf('otc') >= 0;
+
+  return temMensuracao && temMetaPrazoOuAuditoria && temContextoMensuravel;
+}
+
+/**
  * Crivo de execução: POP estruturado (conteudoJson) — não altera persistência.
  * Flags opcionais no objeto pop: crivo_nao_enviado_ao_crivo, crivo_em_revisao (atalhos de workflow).
  *
@@ -4416,7 +4471,7 @@ function avaliarCrivoExecucaoPop_(pop) {
   });
 
   var met = String(cj.metrica || '').trim();
-  var auditOk = met.length >= 20 && /\b(%|contagem|checklist|prazo|hora|dia|semana|sim\/nao|nao conforme)\b/i.test(met);
+  var auditOk = crivoMetricaAuditavelCrivo_(met);
   if (!auditOk) addAlerta('auditabilidade_metrica', 'Métrica pode ficar mais auditável (número, prazo, checklist)', met.slice(0, 120));
   criterios.push({
     id: 'auditabilidade',
