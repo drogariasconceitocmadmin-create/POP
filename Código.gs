@@ -2396,7 +2396,7 @@ function iaMotorContagemTokens_(texto) {
 function iaMotorTemVerboAcao_(texto) {
   var s = iaBagNorm_(texto || '');
   if (!s) return false;
-  return /\b(falar|dizer|perguntar|pergunta|perguntou|responder|responde|explicar|explica|ouvir|ouve|ouviu|olhar|olha|encarar|manter|segurar|apoiar|virar|deixar|levantar|abaixar|apontar|girar|andar|parar|aproximar|afastar|bater|cumprimentar|acenar|esperar|chamar|confirmar|confirma|confirmou|validar|valida|verificar|verifica|verificou|conferir|conferi|checar|ler|mostrar|entregar|entrega|entregou|abrir|fechar|ligar|desligar|anotar|registar|registrar|registra|escrever|assinar|marcar|indicar|indica|apresentar|repetir|separar|pesar|medir|rotular|etiquetar|armazenar|guardar|limpar|higienizar|desinfetar|empacotar|orientar|oriente|avisar|informar|informa|fazer|faz|organizar|repor|recolocar|posicionar|alinhar|entender|entende|entendeu|esclarecer|esclarece|esclareceu|solicitar|solicita|solicitou|identificar|identifica|identificou|escutar|escuta|encaminhar|encaminha|encaminhou|avaliar|avalia|avaliou|retirar|retira|buscar|busca|localizar|localiza|acompanhar|acompanha|finalizar|finaliza|oferecer|oferece|recomendar|recomenda|observar|observa|interromper|interrompe|corrigir|corrige|atender|atende|pedir|pede|agir)\b/.test(
+  return /\b(falar|dizer|perguntar|pergunta|perguntou|responder|responde|explicar|explica|ouvir|ouve|ouviu|olhar|olha|encarar|manter|segurar|apoiar|virar|deixar|levantar|abaixar|apontar|girar|andar|parar|aproximar|afastar|bater|cumprimentar|acenar|esperar|chamar|confirmar|confirma|confirmou|validar|valida|verificar|verifica|verificou|conferir|conferi|checar|ler|mostrar|entregar|entrega|entregou|abrir|fechar|ligar|desligar|anotar|registar|registrar|registra|escrever|assinar|marcar|indicar|indica|apresentar|repetir|separar|pesar|medir|rotular|etiquetar|armazenar|guardar|limpar|higienizar|desinfetar|empacotar|orientar|oriente|avisar|informar|informa|fazer|faz|organizar|repor|recolocar|posicionar|alinhar|entender|entende|entendeu|esclarecer|esclarece|esclareceu|solicitar|solicita|solicitou|identificar|identifica|identificou|escutar|escuta|encaminhar|encaminha|encaminhou|avaliar|avalia|avaliou|retirar|retira|buscar|busca|localizar|localiza|acompanhar|acompanha|finalizar|finaliza|oferecer|oferece|recomendar|recomenda|observar|observa|interromper|interrompe|corrigir|corrige|atender|atende|pedir|pede|agir|saudar|sauda|saudou|sugerir|sugere|sugeriu|consultar|consulta|consultou)\b/.test(
     s
   );
 }
@@ -2418,6 +2418,35 @@ function iaMotorCritItemQaAcaoObservavel_(it) {
     iaMotorCritCampoQaComVerboNaoVago_(o.criterio_aprovacao) ||
     iaMotorCritCampoQaComVerboNaoVago_(o.criterioAprovacao)
   );
+}
+
+/** Verbo de ação (whitelist) em algum campo avaliável — diagnóstico, sem crivo de vago. */
+function iaMotorCritItemTemVerboLexicoQaItensAval_(it) {
+  var o = it || {};
+  var fs = [o.acao, o.descricao, o.padrao, o.evidencia_minima, o.criterioAvaliacao, o.criterio_aprovacao, o.criterioAprovacao];
+  for (var f = 0; f < fs.length; f++) {
+    if (iaMotorTemVerboAcao_(fs[f])) return true;
+  }
+  return false;
+}
+
+/** Texto compacto p/ log quando `acao_observavel` (acao | desc | …). */
+function iaMotorCritCadeiaTextoQaItensAvalLog_(it) {
+  var o = it || {};
+  return [
+    o.acao,
+    o.descricao,
+    o.padrao,
+    o.evidencia_minima,
+    o.criterioAvaliacao,
+    o.criterio_aprovacao,
+    o.criterioAprovacao,
+  ]
+    .map(function (x) {
+      return String(x == null ? '' : x).trim();
+    })
+    .filter(Boolean)
+    .join(' | ');
 }
 
 function iaMotorTemSinalConcreto_(texto) {
@@ -2657,7 +2686,25 @@ function iaMotorQaChecklistIncoming_(mergedIn, contract) {
       if (iaMotorCritItemQaAcaoObservavel_(items[j])) okItems++;
     }
     if (!items.length || okItems < Math.max(1, Math.ceil(items.length * 0.5))) {
-      falhas.push({ codigo: 'acao_observavel', mensagem: 'Itens avaliáveis precisam descrever ação observável (verbo).' });
+      var minOk = Math.max(1, Math.ceil(items.length * 0.5));
+      var diags = [];
+      for (var di = 0; di < items.length; di++) {
+        var it0 = items[di] || {};
+        var lex0 = iaMotorCritItemTemVerboLexicoQaItensAval_(it0);
+        var tx0 = iaMotorCritCadeiaTextoQaItensAvalLog_(it0);
+        diags.push({
+          indice: di,
+          itemId: String(it0.itemId == null || it0.itemId === '' ? di : it0.itemId),
+          texto_analise: tx0 ? tx0 : '(vazio)',
+          verbo_reconhecido: lex0 ? 'SIM' : 'NAO',
+        });
+      }
+      falhas.push({
+        codigo: 'acao_observavel',
+        mensagem: 'Itens avaliáveis precisam descrever ação observável (verbo).',
+        diagnostico_itens: diags,
+        criterio_maioria: { minimo: minOk, obtido: okItems, total: items.length },
+      });
     }
   }
 
@@ -5545,7 +5592,7 @@ function iaMotorSelfTestQaMetricaPosPatchFase4_() {
 
 /**
  * Self-test: QA `acao_observavel` no POP crítico (verbos operacionais + campos; bloqueia frases vagas conhecidas).
- * @returns {{ ok: boolean, novos_verbos: boolean, tradicional: boolean, vago: boolean, caso108: boolean, regressao: boolean }}
+ * @returns {{ ok: boolean, novos_verbos: boolean, tradicional: boolean, vago: boolean, caso108: boolean, caso109: boolean, diagnostico_falha_ok: boolean, regressao: boolean }}
  */
 function iaMotorSelfTestQaAcaoObservavelCritico_() {
   var contractB = { execucao: { tempo: 'imediato', frequencia: 'a cada ocorrência' }, controle: { criterio_sucesso: '90% em 30 dias com auditoria quinzenal' } };
@@ -5574,6 +5621,18 @@ function iaMotorSelfTestQaAcaoObservavelCritico_() {
   var ft = iaMotorQaChecklistIncoming_(Object.assign({ tipo: 'critico', procedimento: procT }, mergedB), contractB);
   var okTr = !ft.some(function (x) { return x.codigo === 'acao_observavel'; });
 
+  var proc109 = [
+    { itemId: 'S1', acao: 'Saudar o cliente no balcão', descricao: 'Saudar o cliente no balcão' },
+    { itemId: 'S2', acao: 'Ouvir a dúvida do cliente', descricao: 'Ouvir a dúvida do cliente' },
+    { itemId: 'S3', acao: 'Consultar o histórico e verificar produtos disponíveis', descricao: 'Consultar o histórico e verificar produtos disponíveis' },
+    { itemId: 'S4', acao: 'Sugerir produtos que atendam à necessidade informada', descricao: 'Sugerir produtos que atendam à necessidade informada' },
+    { itemId: 'S5', acao: 'Acompanhar o cliente até finalizar o atendimento', descricao: 'Acompanhar o cliente até finalizar o atendimento' },
+  ];
+  var f109 = iaMotorQaChecklistIncoming_(Object.assign({ tipo: 'critico', procedimento: proc109 }, mergedB), contractB);
+  var ok109 = !f109.some(function (x) { return x.codigo === 'acao_observavel'; });
+  var okLexSaudSugCon =
+    iaMotorTemVerboAcao_('Saudar o cliente no balcão') && iaMotorTemVerboAcao_('Sugerir produtos') && iaMotorTemVerboAcao_('Consultar o histórico e verificar');
+
   var procV = [
     { itemId: 'V1', acao: 'Atendimento adequado e cordial com atenção mínima', descricao: 'Atendimento adequado e cordial com atenção mínima' },
     { itemId: 'V2', acao: 'Agir com atenção geral e postura mínima', descricao: 'Agir com atenção geral e postura mínima' },
@@ -5581,6 +5640,8 @@ function iaMotorSelfTestQaAcaoObservavelCritico_() {
   ];
   var fv = iaMotorQaChecklistIncoming_(Object.assign({ tipo: 'critico', procedimento: procV }, mergedB), contractB);
   var okVago = fv.some(function (x) { return x.codigo === 'acao_observavel'; });
+  var falV = fv.filter(function (x) { return x && x.codigo === 'acao_observavel'; })[0];
+  var okDiagFalha = !!(falV && Array.isArray(falV.diagnostico_itens) && falV.diagnostico_itens.length === 3 && falV.criterio_maioria);
 
   var contr108 = {
     titulo: 'POP @108',
@@ -5623,11 +5684,14 @@ function iaMotorSelfTestQaAcaoObservavelCritico_() {
   var reg = rQa.ok && r4.ok && rC.ok && rS.ok;
 
   return {
-    ok: okNovos && okTr && okVago && ok108 && reg,
+    ok: okNovos && okTr && okVago && ok108 && ok109 && okLexSaudSugCon && okDiagFalha && reg,
     novos_verbos: okNovos,
     tradicional: okTr,
     vago: okVago,
     caso108: ok108,
+    caso109: ok109,
+    sm109_lex: okLexSaudSugCon,
+    diagnostico_falha_ok: okDiagFalha,
     regressao: reg,
   };
 }
