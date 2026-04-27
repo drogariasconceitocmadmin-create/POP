@@ -2424,11 +2424,20 @@ function iaSanearStringGenericaContrato_(s) {
  * @param {Object} c
  */
 function iaSanearLinguagemGenericaContrato_(c) {
-  if (!c || typeof c !== 'object') return;
+  if (c == null) return;
   if (Array.isArray(c)) {
-    for (var i = 0; i < c.length; i++) iaSanearLinguagemGenericaContrato_(c[i]);
+    for (var i = 0; i < c.length; i++) {
+      var el = c[i];
+      if (el == null) continue;
+      if (typeof el === 'string') {
+        c[i] = iaSanearStringGenericaContrato_(el);
+      } else if (Array.isArray(el) || (typeof el === 'object' && el !== null)) {
+        iaSanearLinguagemGenericaContrato_(el);
+      }
+    }
     return;
   }
+  if (typeof c !== 'object') return;
   for (var k in c) {
     if (!Object.prototype.hasOwnProperty.call(c, k)) continue;
     var v = c[k];
@@ -2584,7 +2593,7 @@ function iaMotorContratoMinimoCriticoBalcao_() {
 
 /**
  * Self-test: saneamento de linguagem genérica no contrato bruto (sem OpenAI).
- * @returns {{ ok: boolean, cordial_bem: boolean, agir_atencao: boolean, fazer_corretamente: boolean, nao_saneavel: boolean, simulado_110: boolean, regressao: boolean }}
+ * @returns {{ ok: boolean, cordial_bem: boolean, agir_atencao: boolean, fazer_corretamente: boolean, nao_saneavel: boolean, simulado_110: boolean, arrays_saneados: boolean, regressao: boolean }}
  */
 function iaMotorSelfTestContratoGenericoSaneamento_() {
   var s110 = 'cliente chega com dúvida';
@@ -2597,14 +2606,16 @@ function iaMotorSelfTestContratoGenericoSaneamento_() {
     });
   };
   var base = iaMotorContratoMinimoCriticoBalcao_();
-  // 1 — o_que_dizer com genérico → saneia → validação passa
+  // 1 — o_que_dizer[] com duas frases genéricas (ordem de capitalização real do modelo)
   var c1 = JSON.parse(JSON.stringify(base));
-  c1.abordagem.o_que_dizer = ['ser cordial e atender bem'];
+  c1.abordagem.o_que_dizer = ['Ser cordial e atender bem o cliente', 'Agir com atenção durante o atendimento'];
   var d1a = iaDetectarLinguagemGenericaDetalhada_(c1);
+  var p1Dizer0 = d1a.some(function (h) { return h.campo === 'abordagem.o_que_dizer[0]'; });
+  var p1Dizer1 = d1a.some(function (h) { return h.campo === 'abordagem.o_que_dizer[1]'; });
   var v1a = validarContratoPopIaBloqueante_(c1, lin, s110, e110);
   iaSanearLinguagemGenericaContrato_(c1);
   var v1b = validarContratoPopIaBloqueante_(c1, lin, s110, e110);
-  var okCordialBem = d1a.length >= 1 && errLg(v1a) && v1b.length === 0;
+  var okCordialBem = d1a.length >= 1 && p1Dizer0 && p1Dizer1 && errLg(v1a) && v1b.length === 0 && !iaTemLinguagemGenerica_(c1);
   // 2 — postura: agir com atenção
   var c2 = JSON.parse(JSON.stringify(base));
   c2.abordagem.postura = 'agir com atenção';
@@ -2612,27 +2623,45 @@ function iaMotorSelfTestContratoGenericoSaneamento_() {
   iaSanearLinguagemGenericaContrato_(c2);
   var v2b = validarContratoPopIaBloqueante_(c2, lin, s110, e110);
   var okAtencao = errLg(v2a) && v2b.length === 0;
-  // 3 — etapa: fazer corretamente
+  // 3 — o_que_fazer[] com fazer/executar corretamente (mín. 3 etapas p/ validar)
   var c3 = JSON.parse(JSON.stringify(base));
-  c3.execucao.o_que_fazer[1] = 'fazer corretamente o registo no sistema e apontar a prateleira';
+  c3.execucao.o_que_fazer = [
+    'Fazer corretamente a conferência no backoffice e na gôndola',
+    'Executar corretamente a etapa e assinalar a prateleira',
+    'Explicar posologia mínima ou encaminhar ao farmacêutico se necessário',
+  ];
+  var d3a = iaDetectarLinguagemGenericaDetalhada_(c3);
+  var p3F0 = d3a.some(function (h) { return h.campo === 'execucao.o_que_fazer[0]'; });
+  var p3F1 = d3a.some(function (h) { return h.campo === 'execucao.o_que_fazer[1]'; });
   var v3a = validarContratoPopIaBloqueante_(c3, lin, s110, e110);
   iaSanearLinguagemGenericaContrato_(c3);
   var v3b = validarContratoPopIaBloqueante_(c3, lin, s110, e110);
-  var okFazerCor = errLg(v3a) && v3b.length === 0;
+  var okFazerCor = errLg(v3a) && v3b.length === 0 && p3F0 && p3F1 && !iaTemLinguagemGenerica_(c3);
+  // 3b — reforço explícito: arrays (detector c/ índice + sem resíduo genérico)
+  var c3b = JSON.parse(JSON.stringify(c3));
+  iaSanearLinguagemGenericaContrato_(c3b);
+  var okArraysDizer =
+    c1.abordagem.o_que_dizer[0].toLowerCase().indexOf('ser cordial') < 0 && c1.abordagem.o_que_dizer[0].toLowerCase().indexOf('atender bem') < 0;
+  var okArraysFazer =
+    c3.execucao.o_que_fazer[0].toLowerCase().indexOf('fazer corretamente') < 0 && c3.execucao.o_que_fazer[1].toLowerCase().indexOf('executar corretamente') < 0;
+  var okArraysSane = okArraysDizer && okArraysFazer && p1Dizer0 && p1Dizer1 && p3F0 && p3F1;
   // 4 — termo fora do mapa de substituição
   var c4 = JSON.parse(JSON.stringify(base));
   c4.abordagem.postura = 'demonstrar segurança geral no atendimento hoje no balcão com cliente na fila';
   iaSanearLinguagemGenericaContrato_(c4);
   var v4 = validarContratoPopIaBloqueante_(c4, lin, s110, e110);
   var det4 = iaDetectarLinguagemGenericaDetalhada_(c4);
-  var okNaoSane = errLg(v4) && det4.length >= 1;
+  var okNaoSane = errLg(v4) && det4.length >= 1 && det4.some(function (h) { return h.termo === 'demonstrar segurança'; });
   // 5 — simulação densa @110
   var c5 = JSON.parse(JSON.stringify(base));
-  c5.abordagem.o_que_dizer = ['Saudar o cliente no balcão', 'ser cordial e atender bem com atenção na fila'];
+  c5.abordagem.o_que_dizer = [
+    'Saudar o cliente no balcão',
+    'ser cordial e atender bem o cliente com atenção na fila',
+  ];
   var d5 = iaDetectarLinguagemGenericaDetalhada_(c5);
   iaSanearLinguagemGenericaContrato_(c5);
   var v5 = validarContratoPopIaBloqueante_(c5, lin, s110, e110);
-  var ok110 = d5.length >= 1 && v5.length === 0;
+  var ok110 = d5.length >= 1 && v5.length === 0 && !iaTemLinguagemGenerica_(c5);
   // regressão
   var rAc = iaMotorSelfTestQaAcaoObservavelCritico_();
   var rM = iaMotorSelfTestQaMetricaPosPatchFase4_();
@@ -2642,12 +2671,13 @@ function iaMotorSelfTestContratoGenericoSaneamento_() {
   var rSc = scoreSelfTestConceito_();
   var reg = rAc.ok && rM.ok && rRep.ok && r4.ok && rCr.ok && rSc.ok;
   return {
-    ok: okCordialBem && okAtencao && okFazerCor && okNaoSane && ok110 && reg,
+    ok: okCordialBem && okAtencao && okFazerCor && okNaoSane && ok110 && okArraysSane && reg,
     cordial_bem: okCordialBem,
     agir_atencao: okAtencao,
     fazer_corretamente: okFazerCor,
     nao_saneavel: okNaoSane,
     simulado_110: ok110,
+    arrays_saneados: okArraysSane,
     regressao: reg,
   };
 }
