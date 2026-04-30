@@ -9135,13 +9135,19 @@ function normalizePopJsonPayload_(user, incoming) {
   var frequenciaOut =
     tipoPop === 'critico' ? normalizeFrequenciaCritico_(freqRaw || '') : normalizeText_(freqRaw || '');
 
-  // O HTML atual manda um objeto gigante "flat"; vamos montar um conteudoJson coerente.
-  var conteudoJson = {
+  // O HTML atual manda um objeto gigante "flat"; preservar chaves extras de Fase 4 e sobrescrever campos editáveis.
+  var conteudoJson = Object.assign({}, contentCandidate);
+  Object.assign(conteudoJson, {
     diretriz_executiva: normalizeText_(obj.diretriz_executiva || contentCandidate.diretriz_executiva || ''),
     objetivo: normalizeText_(obj.objetivo || contentCandidate.objetivo || ''),
     escopo: normalizeText_(obj.escopo || contentCandidate.escopo || ''),
     responsaveis: normalizeStringArray_(obj.responsaveis || contentCandidate.responsaveis || []),
-    materiais_epi: normalizeStringArray_(obj.materiais_epi || contentCandidate.materiais_epi || []),
+    materiais_epi:
+      obj.materiais_epi !== undefined && typeof obj.materiais_epi === 'string'
+        ? normalizeText_(obj.materiais_epi)
+        : contentCandidate.materiais_epi !== undefined && typeof contentCandidate.materiais_epi === 'string'
+          ? normalizeText_(contentCandidate.materiais_epi)
+          : normalizeStringArray_(obj.materiais_epi || contentCandidate.materiais_epi || []),
     regra_de_ouro: normalizeText_(obj.regra_de_ouro || contentCandidate.regra_de_ouro || ''),
     frequencia: frequenciaOut,
     procedimento: procedimentoOut,
@@ -9154,13 +9160,12 @@ function normalizePopJsonPayload_(user, incoming) {
     desvios: normalizeStringArray_(obj.desvios || contentCandidate.desvios || []),
     metrica: normalizeText_(obj.metrica || contentCandidate.metrica || ''),
     treinamento: normalizeText_(obj.treinamento || contentCandidate.treinamento || ''),
-    como_fazer_bem: normalizeText_(
-      obj.como_fazer_bem ||
-        obj.comoFazerBem ||
-        contentCandidate.como_fazer_bem ||
-        contentCandidate.comoFazerBem ||
-        ''
-    ),
+    como_fazer_bem:
+      Array.isArray(obj.como_fazer_bem)
+        ? normalizeStringArray_(obj.como_fazer_bem)
+        : Array.isArray(contentCandidate.como_fazer_bem)
+          ? normalizeStringArray_(contentCandidate.como_fazer_bem)
+          : normalizeText_(obj.como_fazer_bem || obj.comoFazerBem || contentCandidate.como_fazer_bem || contentCandidate.comoFazerBem || ''),
     erro_critico: normalizeText_(
       obj.erro_critico || obj.erroCritico || contentCandidate.erro_critico || contentCandidate.erroCritico || ''
     ),
@@ -9180,7 +9185,7 @@ function normalizePopJsonPayload_(user, incoming) {
     donoDocumento: normalizeText_(obj.donoDocumento || contentCandidate.donoDocumento || '') || gov.donoDocumento,
     aprovadorEsperado: normalizeText_(obj.aprovador || contentCandidate.aprovador || contentCandidate.aprovadorEsperado || '') || gov.aprovadorEsperado,
     tipoFluxo: tipoPop,
-  };
+  });
 
   return {
     popId: normalizeText_(obj.popId || obj.id || contentCandidate.popId || ''),
@@ -9218,6 +9223,54 @@ function normalizePopJsonPayload_(user, incoming) {
     conteudoHtmlGerado: '', // derivado opcional
     tipo: tipoPop,
     origem: normalizeOrigemPop_(obj.origem || contentCandidate.origem || ''),
+  };
+}
+
+function fase4SelfTestRoundTripStandardsViewer_() {
+  var itens = geradorConstruirStandardsAuditaveisBalcao_({ codigos_matriz_mae: ['ATD-001'], familia_prioritaria: 'ATD' });
+  var original = {
+    objetivo: 'Garantir escuta antes da sugestão no balcão.',
+    regra_de_ouro: 'Perguntar antes de sugerir.',
+    frequencia: 'por_demanda',
+    procedimento: ['Perguntar a necessidade antes de sugerir produto'],
+    materiais_epi:
+      'Não se aplica com justificativa: processo de atendimento verbal no balcão, sem manipulação específica de produto ou procedimento clínico.',
+    errosComuns: ['Indicar produto logo após a primeira frase do cliente'],
+    pontosDeAtencao: ['Pressa de fila não justifica sugestão precoce'],
+    como_fazer_bem: ['Olhar para o cliente ao iniciar a fala', 'Perguntar a necessidade principal antes de sugerir produto'],
+    status_crivo: 'aprovado_para_operacao',
+    fase4_score_conceito: { score_geral: null },
+    itens_avaliaveis: itens,
+  };
+  var incoming = {
+    tipo: 'critico',
+    titulo: 'Atendimento ao Cliente na Farmácia',
+    area: 'Atendimento e vendas',
+    processo: 'atendimento no balcão',
+    conteudoJson: JSON.parse(JSON.stringify(original)),
+  };
+  var norm = normalizePopJsonPayload_({ nome: 'Teste', perfil: 'admin' }, incoming);
+  var c = norm.conteudoJson || {};
+  return {
+    ok:
+      Array.isArray(c.itens_avaliaveis) &&
+      c.itens_avaliaveis.length >= 5 &&
+      c.status_crivo === 'aprovado_para_operacao' &&
+      !!c.fase4_score_conceito &&
+      typeof c.materiais_epi === 'string' &&
+      c.materiais_epi.indexOf('Não se aplica com justificativa') >= 0 &&
+      Array.isArray(c.errosComuns) &&
+      c.errosComuns.length > 0 &&
+      Array.isArray(c.pontosDeAtencao) &&
+      c.pontosDeAtencao.length > 0 &&
+      Array.isArray(c.como_fazer_bem),
+    itens_avaliaveis_preservados: Array.isArray(c.itens_avaliaveis) && c.itens_avaliaveis.length >= 5,
+    status_crivo_preservado: c.status_crivo === 'aprovado_para_operacao',
+    fase4_score_conceito_preservado: !!c.fase4_score_conceito,
+    materiais_epi_preservado: typeof c.materiais_epi === 'string' && c.materiais_epi.indexOf('Não se aplica com justificativa') >= 0,
+    errosComuns_preservado: Array.isArray(c.errosComuns) && c.errosComuns.length > 0,
+    pontosDeAtencao_preservado: Array.isArray(c.pontosDeAtencao) && c.pontosDeAtencao.length > 0,
+    como_fazer_bem_lista: Array.isArray(c.como_fazer_bem),
   };
 }
 

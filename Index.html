@@ -1905,6 +1905,7 @@
     let setupData = { areas: [], processos: [], publicoAlvoOptions: [], statusOptions: [], criticidadeOptions: [] };
     /** Trilha de UI: 'critico' mantém formulário estruturado mesmo se o select for forçado a colaborativo por perfil. */
     let __popTipoUiSnapshot = 'colaborativo';
+    window.popConteudoJsonOriginalGerado = null;
 
     /**
      * Funil POP IA (abandono): timers + flags.
@@ -4517,9 +4518,92 @@
       return String(item);
     }
 
+    function temStandardsAuditaveis_(items) {
+      return (
+        Array.isArray(items) &&
+        items.some(function (it) {
+          return !!(it && (it.padrao || it.criterio_aprovacao || it.evidencia_minima || it.codigo_matriz_mae));
+        })
+      );
+    }
+
+    function standardsAuditaveisDoConteudo_(c) {
+      if (!c || typeof c !== 'object') return [];
+      if (temStandardsAuditaveis_(c.itens_avaliaveis)) return c.itens_avaliaveis;
+      if (temStandardsAuditaveis_(c.itensAvaliaveis)) return c.itensAvaliaveis;
+      return [];
+    }
+
     function flattenListaCampo_(arr) {
-      if (!Array.isArray(arr)) return '';
+      if (arr == null) return '';
+      if (typeof arr === 'string' || typeof arr === 'number' || typeof arr === 'boolean') return String(arr).trim();
+      if (!Array.isArray(arr)) return listItemToText_(arr);
       return arr.map(listItemToText_).filter(Boolean).join('\n');
+    }
+
+    function deepCloneJsonSafe_(obj) {
+      if (!obj || typeof obj !== 'object') return {};
+      try {
+        return JSON.parse(JSON.stringify(obj));
+      } catch (e) {
+        return Object.assign({}, obj);
+      }
+    }
+
+    function listaDoCampoPreservandoOriginal_(id, originalValue) {
+      const el = document.getElementById(id);
+      const raw = el ? String(el.value || '').trim() : '';
+      if (!raw) return originalValue !== undefined ? originalValue : [];
+      return raw
+        .split(/\r?\n|(?:\s*[·•]\s*)|(?:\s*;\s*)/g)
+        .map(function (v) { return String(v || '').trim(); })
+        .filter(Boolean);
+    }
+
+    function valorTextoPreservandoBomOriginal_(id, originalValue) {
+      const raw = String(valueOf(id) || '').trim();
+      if (!raw) return originalValue !== undefined ? originalValue : '';
+      const low = raw.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+      if (low === 'nao informado' && originalValue !== undefined && String(originalValue || '').trim()) return originalValue;
+      return raw;
+    }
+
+    function mergeConteudoJsonFase4Preservado_(base, data) {
+      const out = deepCloneJsonSafe_(base || {});
+      const put = function (k, v) { out[k] = v; };
+      [
+        'diretriz_executiva',
+        'objetivo',
+        'escopo',
+        'regra_de_ouro',
+        'frequencia',
+        'metrica',
+        'treinamento',
+        'erro_critico',
+        'resumoAlteracao',
+        'motivoRevisao',
+      ].forEach(function (k) {
+        if (data[k] !== undefined) put(k, data[k]);
+      });
+      [
+        'responsaveis',
+        'materiais_epi',
+        'procedimento',
+        'proibido',
+        'pontos_criticos',
+        'checklist_lider',
+        'checklist',
+        'desvios',
+        'anexos',
+        'documentosRelacionados',
+        'formulariosRelacionados',
+      ].forEach(function (k) {
+        if (data[k] !== undefined) put(k, data[k]);
+      });
+      out.errosComuns = data.errosComuns !== undefined ? data.errosComuns : out.errosComuns;
+      out.pontosDeAtencao = data.pontosDeAtencao !== undefined ? data.pontosDeAtencao : out.pontosDeAtencao;
+      out.como_fazer_bem = data.como_fazer_bem !== undefined ? data.como_fazer_bem : out.como_fazer_bem;
+      return out;
     }
 
     function preencherFormularioComJson(data) {
@@ -4529,6 +4613,7 @@
       };
 
       const conteudo = (data && data.conteudoJson) ? data.conteudoJson : (data && data.conteudoObj) ? data.conteudoObj : {};
+      window.popConteudoJsonOriginalGerado = deepCloneJsonSafe_(conteudo);
 
       __popTipoUiSnapshot = String(data.tipo || '').toLowerCase() === 'critico' ? 'critico' : 'colaborativo';
 
@@ -4619,7 +4704,7 @@
       set('pop_desvios', flattenListaCampo_(conteudo.desvios || []));
       set('pop_metrica', conteudo.metrica || '');
       set('pop_treinamento', conteudo.treinamento || '');
-      set('pop_como_fazer_bem', conteudo.como_fazer_bem || conteudo.comoFazerBem || '');
+      set('pop_como_fazer_bem', flattenListaCampo_(conteudo.como_fazer_bem || conteudo.comoFazerBem || ''));
       set('pop_erro_critico', conteudo.erro_critico || conteudo.erroCritico || '');
 
       const tp = document.getElementById('pop_tipo');
@@ -4775,6 +4860,7 @@
         return null;
       }
 
+      const originalConteudo = deepCloneJsonSafe_(window.popConteudoJsonOriginalGerado || {});
       const data = {
         id: valueOf('pop_id'),
         tipo: (function () {
@@ -4805,19 +4891,21 @@
         diretriz_executiva: valueOf('pop_diretriz_executiva'),
         objetivo: valueOf('pop_objetivo'),
         escopo: valueOf('pop_escopo'),
-        responsaveis: splitTextArea('pop_responsaveis'),
-        materiais_epi: splitTextArea('pop_materiais_epi'),
+        responsaveis: listaDoCampoPreservandoOriginal_('pop_responsaveis', originalConteudo.responsaveis),
+        materiais_epi: valorTextoPreservandoBomOriginal_('pop_materiais_epi', originalConteudo.materiais_epi),
         regra_de_ouro: valueOf('pop_regra_de_ouro'),
         frequencia: popIsCriticoUi_() ? valueOf('pop_frequencia_critica') : valueOf('pop_frequencia'),
-        procedimento: popIsCriticoUi_() ? readCriticoItemsFromDom_() : splitTextArea('pop_procedimento'),
+        procedimento: popIsCriticoUi_() && temStandardsAuditaveis_(originalConteudo.itens_avaliaveis || originalConteudo.itensAvaliaveis)
+          ? (originalConteudo.procedimento || [])
+          : (popIsCriticoUi_() ? readCriticoItemsFromDom_() : splitTextArea('pop_procedimento')),
         proibido: splitTextArea('pop_proibido'),
-        pontos_criticos: splitTextArea('pop_pontos_criticos'),
-        checklist_lider: splitTextArea('pop_checklist_lider'),
-        checklist: splitTextArea('pop_checklist'),
-        desvios: splitTextArea('pop_desvios'),
+        pontos_criticos: listaDoCampoPreservandoOriginal_('pop_pontos_criticos', originalConteudo.pontos_criticos),
+        checklist_lider: listaDoCampoPreservandoOriginal_('pop_checklist_lider', originalConteudo.checklist_lider),
+        checklist: listaDoCampoPreservandoOriginal_('pop_checklist', originalConteudo.checklist),
+        desvios: listaDoCampoPreservandoOriginal_('pop_desvios', originalConteudo.desvios),
         metrica: valueOf('pop_metrica'),
         treinamento: valueOf('pop_treinamento'),
-        como_fazer_bem: valueOf('pop_como_fazer_bem'),
+        como_fazer_bem: listaDoCampoPreservandoOriginal_('pop_como_fazer_bem', originalConteudo.como_fazer_bem || originalConteudo.comoFazerBem),
         erro_critico: valueOf('pop_erro_critico'),
 
         resumoAlteracao: valueOf('pop_resumoAlteracao'),
@@ -4825,6 +4913,9 @@
 
         pdfUrl: ''
       };
+      data.errosComuns = originalConteudo.errosComuns;
+      data.pontosDeAtencao = originalConteudo.pontosDeAtencao;
+      data.conteudoJson = mergeConteudoJsonFase4Preservado_(originalConteudo, data);
 
       if (data.tipo === 'colaborativo') data.origem = data.origem || 'colaborativo_gpt';
 
@@ -4999,6 +5090,7 @@
       document.getElementById('popJsonMsg').innerText = '';
       document.getElementById('popMsg').innerText = '';
       document.getElementById('pop_autor').value = currentUser ? (currentUser.nome || '') : '';
+      window.popConteudoJsonOriginalGerado = null;
       preencherDropdownCadastro();
       aplicarDatasPadraoPopForm_();
       applyPopTipoVisibilityByPerfil_();
@@ -5021,6 +5113,95 @@
       const el = document.getElementById(id);
       if (!el) return [];
       return String(el.value || '').split('\n').map(v => v.trim()).filter(Boolean);
+    }
+
+    function fase4SelfTestRoundTripStandardsViewer_() {
+      const std = geradorSelfTestStandardsViewerFixture_();
+      const original = deepCloneJsonSafe_(std.conteudoJson);
+      const simulacaoCamposEditaveis = {
+        objetivo: original.objetivo,
+        regra_de_ouro: original.regra_de_ouro,
+        frequencia: original.frequencia,
+        procedimento: original.procedimento,
+        materiais_epi: original.materiais_epi,
+        errosComuns: original.errosComuns,
+        pontosDeAtencao: original.pontosDeAtencao,
+        pontos_criticos: original.pontos_criticos,
+        como_fazer_bem: original.como_fazer_bem,
+        checklist: original.checklist,
+        checklist_lider: original.checklist_lider,
+        desvios: original.desvios,
+      };
+      const c = mergeConteudoJsonFase4Preservado_(original, simulacaoCamposEditaveis);
+      const html = renderCriticoProcedimentoViewerHtml_(c.itens_avaliaveis);
+      return {
+        ok:
+          Array.isArray(c.itens_avaliaveis) &&
+          c.itens_avaliaveis.length >= 1 &&
+          c.status_crivo === 'aprovado_para_operacao' &&
+          !!c.fase4_score_conceito &&
+          String(c.materiais_epi || '').indexOf('Não se aplica com justificativa') >= 0 &&
+          Array.isArray(c.errosComuns) &&
+          c.errosComuns.length > 0 &&
+          Array.isArray(c.pontosDeAtencao) &&
+          c.pontosDeAtencao.length > 0 &&
+          Array.isArray(c.como_fazer_bem) &&
+          html.indexOf('Critério de aprovação') >= 0 &&
+          html.indexOf('Evidência mínima') >= 0 &&
+          html.indexOf('Ação corretiva') >= 0 &&
+          html.indexOf('Execução conforme descrição da etapa') < 0,
+        itens_avaliaveis_preservados: Array.isArray(c.itens_avaliaveis) && c.itens_avaliaveis.length >= 1,
+        status_crivo_preservado: c.status_crivo === 'aprovado_para_operacao',
+        fase4_score_conceito_preservado: !!c.fase4_score_conceito,
+        materiais_epi_preservado: String(c.materiais_epi || '').indexOf('Não se aplica com justificativa') >= 0,
+        errosComuns_preservado: Array.isArray(c.errosComuns) && c.errosComuns.length > 0,
+        pontosDeAtencao_preservado: Array.isArray(c.pontosDeAtencao) && c.pontosDeAtencao.length > 0,
+        como_fazer_bem_lista: Array.isArray(c.como_fazer_bem),
+        viewer_renderiza_standards: html.indexOf('Critério de aprovação') >= 0 && html.indexOf('Evidência mínima') >= 0,
+        viewer_sem_generico: html.indexOf('Execução conforme descrição da etapa') < 0,
+      };
+    }
+
+    function geradorSelfTestStandardsViewerFixture_() {
+      return {
+        tipo: 'critico',
+        titulo: 'Atendimento ao Cliente na Farmácia',
+        area: 'Atendimento e vendas',
+        processo: 'atendimento no balcão',
+        conteudoJson: {
+          objetivo: 'Garantir escuta antes da sugestão de produto no balcão.',
+          regra_de_ouro: 'Perguntar antes de sugerir.',
+          frequencia: 'por_demanda',
+          procedimento: ['Perguntar a necessidade antes de sugerir produto'],
+          materiais_epi: 'Não se aplica com justificativa: processo de atendimento verbal no balcão, sem manipulação específica de produto ou procedimento clínico.',
+          errosComuns: ['Indicar produto logo após a primeira frase do cliente'],
+          pontosDeAtencao: ['Pressa de fila não justifica sugestão precoce'],
+          pontos_criticos: ['Sugestão de produto antes de entender a necessidade'],
+          como_fazer_bem: ['Olhar para o cliente ao iniciar a fala', 'Perguntar a necessidade principal antes de sugerir produto'],
+          status_crivo: 'aprovado_para_operacao',
+          fase4_score_conceito: { score_geral: null },
+          itens_avaliaveis: [
+            {
+              itemId: 'STD-BALCAO-ESCUTA-ANTES-SUGESTAO',
+              codigo_matriz_mae: 'ATD-001',
+              secao: 'Atendimento no balcão de medicamentos',
+              dimensao: 'Escuta e orientação ao cliente',
+              classificacao: 'Comunicação e escuta (Básico)',
+              tipo: 'escuta',
+              canal: 'presencial',
+              aplicabilidade: 'quando_houver_atendimento_no_balcao',
+              padrao: 'Ouve a dúvida inicial do cliente e faz ao menos uma pergunta de esclarecimento antes de sugerir produto ou encaminhamento.',
+              criterio_aprovacao: 'Atendente pergunta a necessidade antes de sugerir produto.',
+              criterio_reprovacao: 'Atendente sugere produto sem pergunta prévia.',
+              evidencia_minima: 'fala_registrada + contexto_descrito + acao_observada',
+              gravidade: 'importante',
+              peso: 20,
+              critico: false,
+              acao_corretiva_sugerida: 'Treinar pergunta de esclarecimento antes de qualquer recomendação de produto.',
+            },
+          ],
+        },
+      };
     }
 
     function renderReferenciasTextuais(title, items) {
@@ -5062,6 +5243,11 @@
     }
 
     function arrayToHtml(items) {
+      if (typeof items === 'string' || typeof items === 'number' || typeof items === 'boolean') {
+        const s = String(items).trim();
+        if (!s) return '<p class="empty-text">Não informado.</p>';
+        return '<ul><li>' + escapeHtml(s) + '</li></ul>';
+      }
       if (!items || !items.length) return '<p class="empty-text">Não informado.</p>';
       return '<ul>' + items.map(item => '<li>' + escapeHtml(listItemToText_(item)) + '</li>').join('') + '</ul>';
     }
@@ -5077,6 +5263,54 @@
     function renderCriticoProcedimentoViewerHtml_(items) {
       const arr = Array.isArray(items) ? items : [];
       if (!arr.length) return '<div class="doc-block"><h2>Itens avaliáveis</h2><p class="empty-text">Não informado.</p></div>';
+      if (temStandardsAuditaveis_(arr)) {
+        const rowsStd = arr
+          .map(function (it) {
+            return (
+              '<tr><td>' +
+              escapeHtml(viewerCampoLegivel_(it.itemId || it.codigo || it.codigo_matriz_mae)) +
+              '</td><td>' +
+              escapeHtml(viewerCampoLegivel_(it.secao)) +
+              '</td><td>' +
+              escapeHtml(viewerCampoLegivel_(it.dimensao)) +
+              '</td><td>' +
+              escapeHtml(viewerCampoLegivel_(it.classificacao)) +
+              '</td><td>' +
+              escapeHtml(viewerCampoLegivel_(it.tipo)) +
+              '</td><td>' +
+              escapeHtml(viewerCampoLegivel_(it.canal)) +
+              '</td><td>' +
+              escapeHtml(viewerCampoLegivel_(it.aplicabilidade)) +
+              '</td><td>' +
+              escapeHtml(viewerCampoLegivel_(it.padrao)) +
+              '</td><td>' +
+              escapeHtml(viewerCampoLegivel_(it.criterio_aprovacao || it.criterioAprovacao)) +
+              '</td><td>' +
+              escapeHtml(viewerCampoLegivel_(it.criterio_reprovacao || it.criterioReprovacao)) +
+              '</td><td>' +
+              escapeHtml(viewerCampoLegivel_(it.evidencia_minima)) +
+              '</td><td>' +
+              escapeHtml(viewerCampoLegivel_(it.gravidade)) +
+              '</td><td>' +
+              escapeHtml(viewerCampoLegivel_(it.peso)) +
+              '</td><td>' +
+              (it.critico ? 'Sim' : 'Não') +
+              '</td><td>' +
+              escapeHtml(viewerCampoLegivel_(it.acao_corretiva_sugerida || it.acao_corretiva_padrao)) +
+              '</td></tr>'
+            );
+          })
+          .join('');
+        return (
+          '<div class="doc-block"><h2>Standards auditáveis</h2>' +
+          '<div style="overflow-x:auto"><table class="pop-crit-view-table"><thead><tr>' +
+          '<th>Item/código</th><th>Seção</th><th>Dimensão</th><th>Classificação</th><th>Tipo</th><th>Canal</th><th>Aplicabilidade</th>' +
+          '<th>Padrão</th><th>Critério de aprovação</th><th>Critério de reprovação</th><th>Evidência mínima</th><th>Gravidade</th><th>Peso</th><th>Crítico</th><th>Ação corretiva sugerida</th>' +
+          '</tr></thead><tbody>' +
+          rowsStd +
+          '</tbody></table></div></div>'
+        );
+      }
       const rows = arr
         .map(function (it) {
           return (
@@ -5567,14 +5801,16 @@
       html += '</div>';
 
       html += '<div class="doc-block highlight-block"><h2>Regra de ouro</h2><p>' + (escapeHtml(viewerCampoLegivel_(c.regra_de_ouro)) || 'Não informado.') + '</p></div>';
+      const standardsViewer = standardsAuditaveisDoConteudo_(c);
       const critViewer =
-        String(pop.tipo || '').toLowerCase() === 'critico' && isCriticoProcedimentoItemsUi_(c.procedimento);
+        standardsViewer.length > 0 ||
+        (String(pop.tipo || '').toLowerCase() === 'critico' && isCriticoProcedimentoItemsUi_(c.procedimento));
       if (critViewer) {
         html +=
           '<div class="doc-block"><h2>Frequência</h2><p>' +
           (escapeHtml(viewerCampoLegivel_(humanizeFrequenciaCritico_(c.frequencia))) || 'Não informado.') +
           '</p></div>';
-        html += renderCriticoProcedimentoViewerHtml_(c.procedimento);
+        html += renderCriticoProcedimentoViewerHtml_(standardsViewer.length ? standardsViewer : c.procedimento);
       } else {
         html += '<div class="doc-block"><h2>Frequência</h2><p>' + (escapeHtml(viewerCampoLegivel_(c.frequencia)) || 'Não informado.') + '</p></div>';
         html += '<div class="doc-block"><h2>Procedimento</h2>' + arrayToHtml(c.procedimento) + '</div>';
