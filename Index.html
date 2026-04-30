@@ -4933,7 +4933,8 @@
           showToast('POP crítico: selecione a frequência.', 'error');
           return null;
         }
-        if (!Array.isArray(data.procedimento) || !data.procedimento.length) {
+        const temStandardsPreservados = temStandardsAuditaveis_(data.conteudoJson && (data.conteudoJson.itens_avaliaveis || data.conteudoJson.itensAvaliaveis));
+        if (!temStandardsPreservados && (!Array.isArray(data.procedimento) || !data.procedimento.length)) {
           showToast('POP crítico: inclua pelo menos um item avaliável.', 'error');
           return null;
         }
