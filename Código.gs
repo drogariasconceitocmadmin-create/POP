@@ -5891,7 +5891,9 @@ function geradorEnriquecerCamposViewerBalcao_(cj) {
   }
   var me0 = cj.materiais_epi;
   var meStr = Array.isArray(me0) ? me0.join(' ') : String(me0 == null ? '' : me0);
-  if (geradorCampoTextoMortoF4_(meStr)) {
+  var meBag = iaBagNorm_(meStr);
+  var meNaoSeAplicaSemJustificativa = meBag.indexOf('nao se aplica') >= 0 && meBag.indexOf('justific') < 0;
+  if (geradorCampoTextoMortoF4_(meStr) || meNaoSeAplicaSemJustificativa) {
     cj.materiais_epi =
       'Não se aplica com justificativa: processo de atendimento verbal no balcão, sem manipulação específica de produto ou procedimento clínico.';
   }
@@ -6569,8 +6571,9 @@ function fase4SelfTestQualidadePopAtendimentoBalcao_() {
     cjx.responsaveis.length >= 3;
   var meStr = String(
     Array.isArray(cjx.materiais_epi) ? cjx.materiais_epi.join(' ') : cjx.materiais_epi == null ? '' : cjx.materiais_epi,
-  ).toLowerCase();
-  var matOk = meStr.indexOf('nao se aplica') >= 0 || meStr.indexOf('justificat') >= 0;
+  );
+  var meBag = iaBagNorm_(meStr);
+  var matOk = meBag.indexOf('nao se aplica') >= 0 && meBag.indexOf('justificativa') >= 0;
   var itens = cjx.itens_avaliaveis || [];
   var critOk =
     itens.length >= 5 &&
@@ -6671,8 +6674,14 @@ function fase4SelfTestQualidadeBlocosBalcao_() {
     gov.conversao &&
     gov.conversao.aplicada === false;
 
-  var meStr = String(Array.isArray(cx.materiais_epi) ? cx.materiais_epi.join(' ') : cx.materiais_epi == null ? '' : cx.materiais_epi).toLowerCase();
-  var meOk = meStr.indexOf('nao se aplica') >= 0 && (meStr.indexOf('justifica') >= 0 || meStr.indexOf('justificat') >= 0);
+  var meStr = String(Array.isArray(cx.materiais_epi) ? cx.materiais_epi.join(' ') : cx.materiais_epi == null ? '' : cx.materiais_epi);
+  var meBag = iaBagNorm_(meStr);
+  var meOk =
+    meBag.indexOf('nao se aplica') >= 0 &&
+    meBag.indexOf('justificativa') >= 0 &&
+    meBag.indexOf('atendimento verbal') >= 0 &&
+    meBag.indexOf('balcao') >= 0 &&
+    meBag.indexOf('nao informado') < 0;
 
   var er = cx.errosComuns || [];
   var pa = cx.pontosDeAtencao || [];
