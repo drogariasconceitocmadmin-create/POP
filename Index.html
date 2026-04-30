@@ -5802,10 +5802,18 @@
 
       html += '<div class="doc-block highlight-block"><h2>Regra de ouro</h2><p>' + (escapeHtml(viewerCampoLegivel_(c.regra_de_ouro)) || 'Não informado.') + '</p></div>';
       const standardsViewer = standardsAuditaveisDoConteudo_(c);
+      const fase4SemStandards =
+        String(pop.tipo || '').toLowerCase() === 'critico' &&
+        standardsViewer.length === 0 &&
+        !!(c.status_crivo || c.fase4_score_conceito || c.governanca_modo);
       const critViewer =
         standardsViewer.length > 0 ||
         (String(pop.tipo || '').toLowerCase() === 'critico' && isCriticoProcedimentoItemsUi_(c.procedimento));
-      if (critViewer) {
+      if (fase4SemStandards) {
+        html +=
+          '<div class="doc-block" style="border-color:#b91c1c;background:#fff5f5;"><h2>Estado técnico inválido</h2>' +
+          '<p>POP crítico Fase 4 sem standards auditáveis preservados. Revise a persistência antes de usar este documento no piso.</p></div>';
+      } else if (critViewer) {
         html +=
           '<div class="doc-block"><h2>Frequência</h2><p>' +
           (escapeHtml(viewerCampoLegivel_(humanizeFrequenciaCritico_(c.frequencia))) || 'Não informado.') +

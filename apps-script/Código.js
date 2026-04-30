@@ -8447,6 +8447,7 @@ function createPopDraft_(user, incoming) {
   var headers = getHeaders_(sheet);
 
   var normalized = normalizePopJsonPayload_(user, incoming || {});
+  var diagF4Create = popGarantirQualidadeFase4AntesPersistir_(normalized, user, 'pop_critico_payload_pre_save');
   assertTipoLinhaPopPermitidos_(user, normalized, incoming || {});
   assertTipoPopPermitido_(user, normalized.tipo);
   assertPortalPopMinimoSemanticoPersistencia_(normalized);
@@ -8493,6 +8494,7 @@ function createPopDraft_(user, incoming) {
   rowObj.status = 'rascunho';
 
   appendRowObj_(sheet, headers, rowObj);
+  popLogPersistenciaFase4_(user, 'pop_critico_payload_post_save', normalized, diagF4Create.origem_itens, diagF4Create.degradacao);
   var created = normalizePopRow_(rowObj);
   popDiagLog_('createPopDraft', {
     spreadsheetId: SPREADSHEET_ID,
@@ -8544,6 +8546,7 @@ function updatePopDraft_(user, popId, versaoId, incoming) {
     cjMerge.processo = normalizeText_(match.obj.processo || cjMerge.processo || '');
   }
   normalized.conteudoJson = cjMerge;
+  var diagF4Update = popGarantirQualidadeFase4AntesPersistir_(normalized, user, 'pop_critico_payload_pre_save');
 
   if (normalizeTipoPop_(normalized.tipo) === 'critico') {
     var prevCj0 = match.obj.conteudoObj || {};
@@ -8588,6 +8591,7 @@ function updatePopDraft_(user, popId, versaoId, incoming) {
   };
 
   applyRowPatch_(sheet, match.rowIndex, patch);
+  popLogPersistenciaFase4_(user, 'pop_critico_payload_post_save', normalized, diagF4Update.origem_itens, diagF4Update.degradacao);
   var updated = getPopForUser_(user, match.obj.popId, match.obj.versaoId);
   popDiagLog_('updatePopDraft', {
     spreadsheetId: SPREADSHEET_ID,
@@ -9226,6 +9230,150 @@ function normalizePopJsonPayload_(user, incoming) {
   };
 }
 
+function popNormalizarStandardAuditavel_(item) {
+  var it = item || {};
+  var out = Object.assign({}, it);
+  if (!out.padrao && out.standard) out.padrao = out.standard;
+  if (!out.evidencia_minima && out.evidencia_observavel) out.evidencia_minima = out.evidencia_observavel;
+  if (!out.acao_corretiva_sugerida && out.acao_corretiva) out.acao_corretiva_sugerida = out.acao_corretiva;
+  if (!out.tipo && out.tipo_item) out.tipo = out.tipo_item;
+  if (!out.codigo && out.codigo_matriz_mae) out.codigo = out.codigo_matriz_mae;
+  if (!out.codigo_matriz_mae && out.codigo) out.codigo_matriz_mae = out.codigo;
+  if (!out.itemId) out.itemId = out.codigo || out.codigo_matriz_mae || '';
+  if (!out.criterioAvaliacao && out.criterio_aprovacao && out.criterio_reprovacao) {
+    out.criterioAvaliacao =
+      'Aprovar se ' +
+      String(out.criterio_aprovacao).charAt(0).toLowerCase() +
+      String(out.criterio_aprovacao).slice(1) +
+      ' Reprovar se ' +
+      String(out.criterio_reprovacao).charAt(0).toLowerCase() +
+      String(out.criterio_reprovacao).slice(1);
+  }
+  if (!out.tipoAvaliacao) out.tipoAvaliacao = 'binario';
+  if (out.peso == null || out.peso === '') out.peso = out.gravidade === 'critica' ? 25 : 20;
+  if (out.obrigatorio == null) out.obrigatorio = true;
+  if (out.critico == null) out.critico = iaBagNorm_(out.gravidade) === 'critica';
+  if (!out.resultado) out.resultado = 'n/a';
+  if (!out.pontuacao) out.pontuacao = 'fora_do_calculo';
+  if (out.observacoes_avaliador == null) out.observacoes_avaliador = '';
+  if (!out.acao_corretiva_padrao && out.acao_corretiva_sugerida) out.acao_corretiva_padrao = out.acao_corretiva_sugerida;
+  if (out.responsavel_correcao == null) out.responsavel_correcao = '';
+  if (out.prazo_correcao == null) out.prazo_correcao = '';
+  if (!out.status_correcao) out.status_correcao = 'pendente_avaliacao';
+  if (out.data_reauditoria_prevista === undefined) out.data_reauditoria_prevista = null;
+  return out;
+}
+
+function popTemStandardsAuditaveisFortes_(itens) {
+  if (!Array.isArray(itens) || itens.length < 5) return false;
+  var chk = crivoAvaliarItensAvaliaveis_(itens);
+  return !!(chk && chk.ok);
+}
+
+function popContextoBalcaoSugestaoPrecoce_(normalized) {
+  var cj = (normalized && normalized.conteudoJson) || {};
+  return geradorDetectarContextoBalcaoNecessidade_({
+    processo:
+      ((normalized && normalized.processo) || cj.processo || '') +
+      ' ' +
+      ((normalized && normalized.titulo) || cj.titulo || '') +
+      ' ' +
+      (cj.objetivo || ''),
+    situacao: cj.situacao || cj.contexto || '',
+    erro:
+      (cj.erro_critico || cj.erroCritico || cj.erro || '') +
+      ' ' +
+      normalizeStringArray_(cj.procedimento || []).join(' '),
+  });
+}
+
+function popResumoFase4Persistencia_(cj, origemItens, degradacao) {
+  var c = cj || {};
+  var itens = c.itens_avaliaveis || c.itensAvaliaveis || [];
+  return {
+    itens_avaliaveis: Array.isArray(itens) ? itens.length : 0,
+    origem_itens: origemItens || '',
+    fase4_presentes: {
+      status_crivo: !!c.status_crivo,
+      fase4_score_conceito: !!c.fase4_score_conceito,
+      governanca_modo: !!c.governanca_modo,
+      materiais_epi: !crivoCampoMortoEssencial_(c.materiais_epi, { permiteNaoSeAplicaJustificado: true }),
+      errosComuns: Array.isArray(c.errosComuns) && c.errosComuns.length > 0,
+      pontosDeAtencao: Array.isArray(c.pontosDeAtencao) && c.pontosDeAtencao.length > 0,
+    },
+    degradacao_detectada: !!degradacao,
+  };
+}
+
+function popLogPersistenciaFase4_(user, acao, normalized, origemItens, degradacao) {
+  var cj = (normalized && normalized.conteudoJson) || {};
+  logFluxo_(user, {
+    acao: acao,
+    etapa: 'persistencia',
+    status: degradacao ? 'ajustado' : 'ok',
+    tipo: normalizeTipoPop_(normalized && normalized.tipo),
+    origem: String((normalized && normalized.origem) || ''),
+    popId: String((normalized && normalized.popId) || ''),
+    mensagem: 'Persistência POP crítico Fase 4',
+    payloadResumo: JSON.stringify(popResumoFase4Persistencia_(cj, origemItens, degradacao)),
+  });
+}
+
+function popGarantirQualidadeFase4AntesPersistir_(normalized, user, origemLog) {
+  if (!normalized || typeof normalized !== 'object') return { origem_itens: '', degradacao: false };
+  var cj = normalized.conteudoJson || {};
+  normalized.conteudoJson = cj;
+  var isCrit = normalizeTipoPop_(normalized.tipo) === 'critico';
+  var isBalcao = popContextoBalcaoSugestaoPrecoce_(normalized);
+  var rawItens = cj.itens_avaliaveis || cj.itensAvaliaveis || [];
+  var itensNorm = Array.isArray(rawItens)
+    ? rawItens.map(function (it) { return popNormalizarStandardAuditavel_(it); })
+    : [];
+  var origemItens = itensNorm.length ? 'fase4' : '';
+  var forte = popTemStandardsAuditaveisFortes_(itensNorm);
+  var degradacao = false;
+  if (itensNorm.length && !forte) degradacao = true;
+
+  if (isBalcao) {
+    geradorEnriquecerCamposViewerBalcao_(cj);
+    geradorForcarBlocosOperacionaisBalcao_(cj, {}, '', cj.erro_critico || cj.erroCritico || '');
+    if (countProcedimentoEtapasValidas_(cj.procedimento || []) < 1) {
+      cj.procedimento = [
+        'Perguntar a necessidade do cliente antes de sugerir produto no balcão',
+        'Confirmar o entendimento da dúvida em frase curta',
+        'Encaminhar ao farmacêutico quando houver risco, receita ou dúvida técnica',
+      ];
+    }
+  }
+
+  if ((isCrit || isBalcao) && isBalcao && !forte) {
+    var refs = cj.fase4_matriz_mapeamento || { codigos_matriz_mae: [], familia_prioritaria: 'ATD' };
+    itensNorm = geradorConstruirStandardsAuditaveisBalcao_(refs);
+    cj.fase4_matriz_mapeamento = refs;
+    origemItens = degradacao ? 'normalizador_corrigiu_degradacao' : 'normalizador';
+    degradacao = true;
+    forte = true;
+  }
+
+  if (itensNorm.length) {
+    cj.itens_avaliaveis = itensNorm;
+    delete cj.itensAvaliaveis;
+  }
+
+  if ((isCrit || isBalcao) && isBalcao) {
+    var crivo = avaliarCrivoExecucaoPop_(normalized);
+    geradorAplicarMetadadosCrivoNoConteudo_(cj, crivo);
+    cj.fase4_score_conceito = calcularScoreExecucaoConceito_(cj.itens_avaliaveis || []);
+    if (crivo.status_crivo === 'reprovado_no_crivo') {
+      popLogPersistenciaFase4_(user, 'pop_critico_degradation_blocked', normalized, origemItens, true);
+      throw new Error('POP crítico com standards auditáveis fracos: ' + String(crivo.resumo || 'reprovado no crivo'));
+    }
+  }
+
+  popLogPersistenciaFase4_(user, origemLog || 'pop_critico_payload_pre_save', normalized, origemItens, degradacao);
+  return { origem_itens: origemItens, degradacao: degradacao };
+}
+
 function fase4SelfTestRoundTripStandardsViewer_() {
   var itens = geradorConstruirStandardsAuditaveisBalcao_({ codigos_matriz_mae: ['ATD-001'], familia_prioritaria: 'ATD' });
   var original = {
@@ -9271,6 +9419,106 @@ function fase4SelfTestRoundTripStandardsViewer_() {
     errosComuns_preservado: Array.isArray(c.errosComuns) && c.errosComuns.length > 0,
     pontosDeAtencao_preservado: Array.isArray(c.pontosDeAtencao) && c.pontosDeAtencao.length > 0,
     como_fazer_bem_lista: Array.isArray(c.como_fazer_bem),
+  };
+}
+
+function fase4SelfTestRoundTripStandardsPersistencia_() {
+  var user = { nome: 'Teste', perfil: 'admin' };
+  var itens = geradorConstruirStandardsAuditaveisBalcao_({ codigos_matriz_mae: ['ATD-001'], familia_prioritaria: 'ATD' });
+  var forte = {
+    tipo: 'critico',
+    titulo: 'Atendimento ao Cliente na Farmácia',
+    area: 'Atendimento e vendas',
+    processo: 'atendimento no balcão',
+    conteudoJson: {
+      objetivo:
+        'Garantir que o atendente entenda a necessidade do cliente antes de sugerir produto, reduzindo indicação inadequada e aumentando a segurança no balcão.',
+      regra_de_ouro: 'Perguntar antes de sugerir.',
+      frequencia: 'por_demanda',
+      procedimento: ['Perguntar a necessidade antes de sugerir produto'],
+      erro_critico: 'Atendente sugere produto sem entender a necessidade do cliente no balcão.',
+      materiais_epi:
+        'Não se aplica com justificativa: processo de atendimento verbal no balcão, sem manipulação específica de produto ou procedimento clínico.',
+      errosComuns: ['Indicar produto logo após a primeira frase do cliente'],
+      pontosDeAtencao: ['Pressa de fila não justifica sugestão precoce'],
+      pontos_criticos: ['Sugestão de produto antes de entender a necessidade'],
+      como_fazer_bem: ['Olhar para o cliente ao iniciar a fala', 'Perguntar a necessidade principal antes de sugerir produto'],
+      status_crivo: 'aprovado_para_operacao',
+      fase4_score_conceito: { score_geral: null },
+      itens_avaliaveis: itens,
+    },
+  };
+  var normForte = normalizePopJsonPayload_(user, JSON.parse(JSON.stringify(forte)));
+  popGarantirQualidadeFase4AntesPersistir_(normForte, user, 'selftest_pre_save');
+  var cf = normForte.conteudoJson || {};
+
+  var fraco = {
+    tipo: 'critico',
+    titulo: 'Atendimento ao Cliente na Farmácia',
+    area: 'Atendimento e vendas',
+    processo: 'atendimento no balcão',
+    conteudoJson: {
+      objetivo:
+        'Garantir que o atendente entenda a necessidade do cliente antes de sugerir produto, reduzindo indicação inadequada e aumentando a segurança no balcão.',
+      regra_de_ouro: 'Perguntar antes de sugerir.',
+      frequencia: 'por_demanda',
+      erro_critico: 'Atendente sugere produto sem entender a necessidade do cliente no balcão.',
+      procedimento: [
+        {
+          itemId: '1',
+          descricao: 'Perguntar ao cliente',
+          acao: 'Perguntar ao cliente',
+          criterioAvaliacao: 'Execução conforme descrição da etapa, observável no ponto de venda.',
+          tipoAvaliacao: 'binario',
+          peso: 1,
+          obrigatorio: true,
+          critico: false,
+        },
+      ],
+      materiais_epi: [],
+      errosComuns: [],
+      pontosDeAtencao: [],
+      como_fazer_bem: 'Olhar para o cliente. Perguntar a necessidade antes de sugerir produto.',
+    },
+  };
+  var normFraco = normalizePopJsonPayload_(user, JSON.parse(JSON.stringify(fraco)));
+  popGarantirQualidadeFase4AntesPersistir_(normFraco, user, 'selftest_pre_save');
+  var cw = normFraco.conteudoJson || {};
+  var chkFraco = crivoAvaliarItensAvaliaveis_(cw.itens_avaliaveis || []);
+
+  var okForte =
+    Array.isArray(cf.itens_avaliaveis) &&
+    cf.itens_avaliaveis.length >= 5 &&
+    cf.status_crivo &&
+    !!cf.fase4_score_conceito &&
+    typeof cf.materiais_epi === 'string' &&
+    cf.materiais_epi.indexOf('Não se aplica com justificativa') >= 0 &&
+    Array.isArray(cf.errosComuns) &&
+    cf.errosComuns.length >= 4 &&
+    Array.isArray(cf.pontosDeAtencao) &&
+    cf.pontosDeAtencao.length >= 4 &&
+    Array.isArray(cf.como_fazer_bem);
+  var okFracoCorrigido =
+    Array.isArray(cw.itens_avaliaveis) &&
+    cw.itens_avaliaveis.length >= 5 &&
+    chkFraco.ok &&
+    typeof cw.materiais_epi === 'string' &&
+    cw.materiais_epi.indexOf('Não se aplica com justificativa') >= 0 &&
+    Array.isArray(cw.errosComuns) &&
+    cw.errosComuns.length >= 4 &&
+    Array.isArray(cw.pontosDeAtencao) &&
+    cw.pontosDeAtencao.length >= 4 &&
+    Array.isArray(cw.como_fazer_bem);
+  return {
+    ok: okForte && okFracoCorrigido,
+    itens_avaliaveis_preservados: Array.isArray(cf.itens_avaliaveis) && cf.itens_avaliaveis.length >= 5,
+    status_crivo_preservado: !!cf.status_crivo,
+    fase4_score_conceito_preservado: !!cf.fase4_score_conceito,
+    materiais_epi_preservado: typeof cf.materiais_epi === 'string' && cf.materiais_epi.indexOf('Não se aplica com justificativa') >= 0,
+    errosComuns_preservado: Array.isArray(cf.errosComuns) && cf.errosComuns.length >= 4,
+    pontosDeAtencao_preservado: Array.isArray(cf.pontosDeAtencao) && cf.pontosDeAtencao.length >= 4,
+    como_fazer_bem_lista: Array.isArray(cf.como_fazer_bem),
+    payload_legado_fraco_nao_salva_fraco: okFracoCorrigido,
   };
 }
 
