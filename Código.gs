@@ -4833,65 +4833,117 @@ function crivoAcaoCorretivaVaga_(desvios) {
   return ok < Math.min(2, desvios.length);
 }
 
+function crivoCriterioAvaliacaoGenerico_(texto) {
+  var t = String(texto == null ? '' : texto).trim();
+  var bag = iaBagNorm_(t);
+  if (!bag) return true;
+  if (bag.indexOf('execucao conforme descricao da etapa') >= 0) return true;
+  if (bag.indexOf('executar conforme padrao') >= 0) return true;
+  if (bag.indexOf('realizar corretamente') >= 0) return true;
+  if (bag.indexOf('observavel no ponto de venda') >= 0 && bag.indexOf('aprovar se') < 0 && bag.indexOf('reprovar se') < 0) return true;
+  return !(bag.indexOf('aprovar se') >= 0 && bag.indexOf('reprovar se') >= 0);
+}
+
+function crivoItemPareceEtapaProcedural_(item) {
+  var t = String((item && (item.padrao || item.comportamento || item.descricao || item.texto)) || '').trim();
+  var bag = iaBagNorm_(t);
+  if (!bag) return true;
+  var verbos = ['saudar ', 'cumprimentar ', 'perguntar ', 'escutar ', 'ouvir ', 'consultar ', 'sugerir ', 'acompanhar ', 'verificar ', 'informar '];
+  var temJulgamento =
+    bag.indexOf('antes de') >= 0 ||
+    bag.indexOf('sem ') >= 0 ||
+    bag.indexOf('necessidade') >= 0 ||
+    bag.indexOf('criterio') >= 0 ||
+    bag.indexOf('limite de atuacao') >= 0 ||
+    bag.indexOf('proximo passo') >= 0 ||
+    bag.indexOf('farmaceutico') >= 0;
+  for (var i = 0; i < verbos.length; i++) {
+    if (bag.indexOf(iaBagNorm_(verbos[i])) === 0 && !temJulgamento) return true;
+  }
+  return false;
+}
+
 function crivoAvaliarItensAvaliaveis_(itens) {
   var out = { ok: true, motivo: '', evidencia: '' };
   if (!Array.isArray(itens) || itens.length < 1) return out;
-  var criteriosAprov = [];
+  var criteriosAval = [];
+  var pesos = {};
+  var gravs = {};
+  var criticos = 0;
   for (var i = 0; i < itens.length; i++) {
     var it = itens[i] || {};
-    var comp = String(it.comportamento || it.padrao || it.descricao || it.texto || '').trim();
+    var pad = String(it.padrao || it.comportamento || it.descricao || it.texto || '').trim();
     var cap = String(it.criterio_aprovacao || it.criterioAprovacao || '').trim();
     var cre = String(it.criterio_reprovacao || it.criterioReprovacao || '').trim();
-    if (comp.length < 20) {
+    var cAv0 = String(it.criterioAvaliacao || '').trim();
+    var evi0 = String(it.evidencia_minima || '').trim();
+    var grav0 = String(it.gravidade || '').trim();
+    var acao0 = String(it.acao_corretiva_sugerida || it.acao_corretiva_padrao || '').trim();
+    if (pad.length < 20) {
       out.ok = false;
-      out.motivo = 'Item avaliável sem comportamento único suficientemente concreto';
+      out.motivo = 'Item avaliável sem padrão auditável suficientemente concreto';
       out.evidencia = 'item[' + i + ']';
       return out;
     }
-    if (cap.length < 12 || cre.length < 12) {
+    if (cap.length < 18 || cre.length < 18) {
       out.ok = false;
       out.motivo = 'Item sem critério claro de aprovação e reprovação';
       out.evidencia = 'item[' + i + ']';
       return out;
     }
-    var cAv0 = String(it.criterioAvaliacao || '').trim();
-    if (cAv0) {
-      var bagCAv = iaBagNorm_(cAv0);
-      if (bagCAv.indexOf('execucao conforme descricao da etapa') >= 0 || bagCAv.indexOf('execução conforme descrição da etapa') >= 0) {
-        out.ok = false;
-        out.motivo = 'criterioAvaliacao genérico (execução conforme descrição da etapa)';
-        out.evidencia = cAv0.slice(0, 120);
-        return out;
-      }
-    }
-    var evi0 = String(it.evidencia_minima || '').trim();
     if (evi0.length < 16) {
       out.ok = false;
       out.motivo = 'Evidência mínima vaga no item avaliável';
       out.evidencia = 'item[' + i + ']';
       return out;
     }
-    var bagA = iaBagNorm_(cap);
-    if (bagA.indexOf('execucao conforme descricao da etapa') >= 0 || bagA.indexOf('execução conforme descrição da etapa') >= 0) {
+    if (!grav0) {
       out.ok = false;
-      out.motivo = 'Critério genérico proibido (execução conforme descrição da etapa)';
-      out.evidencia = cap.slice(0, 120);
+      out.motivo = 'Item avaliável sem gravidade';
+      out.evidencia = 'item[' + i + ']';
       return out;
     }
-    if (bagA.indexOf('observavel no ponto de venda') >= 0 && bagA.length < 45) {
+    if (acao0.length < 18) {
       out.ok = false;
-      out.motivo = 'Critério vago (observável no ponto de venda sem especificação)';
-      out.evidencia = cap.slice(0, 120);
+      out.motivo = 'Item avaliável sem ação corretiva específica';
+      out.evidencia = 'item[' + i + ']';
       return out;
     }
-    criteriosAprov.push(bagA);
+    if (crivoCriterioAvaliacaoGenerico_(cAv0)) {
+      out.ok = false;
+      out.motivo = 'criterioAvaliacao genérico ou sem regra de aprovação/reprovação';
+      out.evidencia = cAv0.slice(0, 160);
+      return out;
+    }
+    if (crivoItemPareceEtapaProcedural_(it)) {
+      out.ok = false;
+      out.motivo = 'Item avaliável parece etapa procedural, não standard auditável';
+      out.evidencia = pad.slice(0, 160);
+      return out;
+    }
+    criteriosAval.push(iaBagNorm_(cAv0));
+    pesos[String(it.peso != null ? it.peso : '')] = true;
+    gravs[iaBagNorm_(grav0)] = true;
+    if (it.critico === true || iaBagNorm_(grav0) === 'critica') criticos++;
   }
   var uniq = {};
-  for (var u = 0; u < criteriosAprov.length; u++) uniq[criteriosAprov[u]] = true;
-  if (Object.keys(uniq).length === 1 && criteriosAprov.length > 1) {
+  for (var u = 0; u < criteriosAval.length; u++) uniq[criteriosAval[u]] = true;
+  if (Object.keys(uniq).length === 1 && criteriosAval.length > 1) {
     out.ok = false;
-    out.motivo = 'Critério de aprovação repetido em todos os itens avaliáveis';
-    out.evidencia = criteriosAprov[0].slice(0, 120);
+    out.motivo = 'criterioAvaliacao repetido em todos os itens avaliáveis';
+    out.evidencia = criteriosAval[0].slice(0, 120);
+    return out;
+  }
+  if (Object.keys(gravs).length > 1 && Object.keys(pesos).length === 1 && itens.length > 1) {
+    out.ok = false;
+    out.motivo = 'Todos os pesos iguais apesar de gravidades diferentes';
+    out.evidencia = Object.keys(pesos)[0];
+    return out;
+  }
+  if (criticos > 0 && criticos === itens.length && itens.length > 1) {
+    out.ok = false;
+    out.motivo = 'Todos os itens marcados como críticos sem distinção de risco';
+    out.evidencia = String(criticos);
     return out;
   }
   return out;
@@ -5914,98 +5966,142 @@ function geradorForcarBlocosOperacionaisBalcao_(cj, contract, situacaoIn, erroIn
 }
 
 /**
- * 5 itens auditáveis (Matriz_Mae) — critérios distintos, sem texto genérico de etapa.
+ * Standards auditáveis de balcão: não são etapas do procedimento; são critérios de auditoria com aprovação/reprovação.
  * @param {Object} matrizRefs
  * @returns {Array<Object>}
  */
-function geradorConstruirItensAvaliaveisBalcaoFortes_(matrizRefs) {
-  void matrizRefs;
-  var r1 = matrizMaeRowPorCodigoF4_('ATD-001');
-  var r3 = matrizMaeRowPorCodigoF4_('ATD-003');
-  var r4 = matrizMaeRowPorCodigoF4_('ATD-004');
-  var r15 = matrizMaeRowPorCodigoF4_('ATD-015');
-  var r5 = matrizMaeRowPorCodigoF4_('ATD-005');
-  var rows = [r1, r3, r4, r15, r5];
+function geradorConstruirStandardsAuditaveisBalcao_(matrizRefs) {
+  var refs = matrizRefs || {};
   var specs = [
     {
+      id: 'STD-BALCAO-ESCUTA-ANTES-SUGESTAO',
+      codigo: 'ATD-001',
+      tipo: 'escuta',
       padrao:
         'Ouve a dúvida inicial do cliente e faz ao menos uma pergunta de esclarecimento antes de sugerir produto ou encaminhamento.',
-      evid: 'fala_registrada + contexto_descrito + acao_observada',
-      grav: 'importante',
-      cap: 'Há pergunta de esclarecimento registrada ou audível no balcão antes de sugerir ou encaminhar',
-      cre: 'Sugere produto ou encaminha sem fazer nenhuma pergunta de esclarecimento após a dúvida inicial',
-      acor: 'Treinar pergunta de esclarecimento antes de qualquer sugestão.',
+      criterio_aprovacao:
+        'Atendente pergunta a necessidade, escuta a resposta e só depois sugere produto, alternativa ou encaminhamento.',
+      criterio_reprovacao:
+        'Atendente sugere produto antes de entender a necessidade ou sem pergunta de esclarecimento.',
+      evidencia_minima: 'fala_registrada + contexto_descrito + acao_observada',
+      gravidade: 'importante',
+      peso: 20,
+      critico: false,
+      acao_corretiva_sugerida: 'Treinar pergunta de esclarecimento antes de qualquer recomendação de produto.',
     },
     {
+      id: 'STD-BALCAO-CONFIRMACAO-ENTENDIMENTO',
+      codigo: 'ATD-003',
+      tipo: 'clareza',
       padrao:
-        'Organiza em voz clara o que entendeu da necessidade do cliente antes de orientar, sem obrigá-lo a repetir informações já dadas.',
-      evid: 'fala_registrada + contexto_descrito + impacto_observado',
-      grav: 'importante',
-      cap: 'Reformula o entendimento em frase curta sem que o cliente precise repetir o mesmo conteúdo',
-      cre: 'O cliente repete a mesma informação sem que o atendente confirme o entendimento em voz clara',
-      acor: 'Treinar confirmação de entendimento com frase fechada e sem redundância para o cliente.',
+        'Confirma em voz clara o que entendeu da necessidade do cliente antes de orientar, sem obrigá-lo a repetir informações já dadas.',
+      criterio_aprovacao: 'Atendente resume a dúvida ou necessidade em frase curta antes de orientar.',
+      criterio_reprovacao: 'Atendente responde sem confirmar entendimento ou faz o cliente repetir por falha de escuta.',
+      evidencia_minima: 'fala_registrada + contexto_descrito + impacto_observado',
+      gravidade: 'importante',
+      peso: 20,
+      critico: false,
+      acao_corretiva_sugerida: 'Treinar confirmação curta do entendimento antes da orientação.',
     },
     {
-      padrao:
-        'Direciona a conversa de forma objetiva e conduz o cliente ao produto, alternativa ou encaminhamento adequado sem deixá-lo sem próximo passo.',
-      evid: 'acao_observada + contexto_descrito + desfecho',
-      grav: 'importante',
-      cap: 'A conversa chega a uma alternativa, produto ou encaminhamento, com encerramento mínimo do fio lógico',
-      cre: 'O cliente fica sem orientação, alternativa ou encaminhamento após a interação no balcão',
-      acor: 'Treinar condução em três atos: entender, propor alternativa, definir desfecho.',
+      id: 'STD-BALCAO-CONDUCAO-PROXIMO-PASSO',
+      codigo: 'ATD-004',
+      tipo: 'conducao',
+      padrao: 'Conduz o cliente ao produto, alternativa ou encaminhamento adequado sem deixá-lo sem próximo passo.',
+      criterio_aprovacao:
+        'Atendente informa claramente o próximo passo: produto, alternativa, consulta ao farmacêutico ou orientação de atendimento.',
+      criterio_reprovacao: 'Atendente encerra ou deixa o cliente sem direcionamento claro.',
+      evidencia_minima: 'acao_observada + contexto_descrito + desfecho',
+      gravidade: 'importante',
+      peso: 20,
+      critico: false,
+      acao_corretiva_sugerida: 'Treinar fechamento parcial com indicação objetiva do próximo passo.',
     },
     {
+      id: 'STD-BALCAO-ENCAMINHAMENTO-FARMACEUTICO',
+      codigo: 'ATD-015',
+      tipo: 'orientacao',
       padrao:
         'Encaminha ao farmacêutico demandas que extrapolam orientação simples de balcão, sem improvisar recomendação indevida.',
-      evid: 'acao_observada + contexto_descrito + impacto_observado',
-      grav: 'critica',
-      cap: 'Em dúvida fora de OTC, há encaminhamento explícito ao farmacêutico ou adiamento de recomendação indevida',
-      cre: 'Dá opinião clínica, dosagem, substituição fora de perfil ou evita o encaminhamento quando obrigatório',
-      acor: 'Rever limite legal e de atuação: balcão orienta, farmacêutico decide quando houver dúvida técnica.',
+      criterio_aprovacao:
+        'Atendente reconhece limite de atuação e chama o farmacêutico quando há receita, risco, dúvida técnica ou insegurança.',
+      criterio_reprovacao: 'Atendente improvisa orientação técnica ou sugere produto em situação que exige farmacêutico.',
+      evidencia_minima: 'acao_observada + contexto_descrito + risco_identificado',
+      gravidade: 'critica',
+      peso: 25,
+      critico: true,
+      acao_corretiva_sugerida:
+        'Reforçar regra de encaminhamento farmacêutico e revisar exemplos de situações de risco no balcão.',
     },
     {
-      padrao: 'Encerra a interação com próximo passo claro, informando ao cliente o que será feito ou como seguirá o atendimento.',
-      evid: 'fala_registrada + desfecho + contexto_descrito',
-      grav: 'importante',
-      cap: 'O cliente sabe o próximo passo (espera, fila, retirada, encaminhamento) ao final do contato no balcão',
-      cre: 'Encerramento vago, sem dizer ao cliente o que acontece a seguir',
-      acor: 'Treinar fechamento com frase padrão de próximo passo no balcão.',
+      id: 'STD-BALCAO-FECHAMENTO-CLARO',
+      codigo: 'ATD-005',
+      tipo: 'fechamento',
+      padrao:
+        'Encerra a interação com próximo passo claro, informando ao cliente o que será feito ou como seguirá o atendimento.',
+      criterio_aprovacao: 'Atendente finaliza explicando o próximo passo de forma objetiva.',
+      criterio_reprovacao: 'Atendente encerra sem clareza ou sem confirmar se o cliente entendeu.',
+      evidencia_minima: 'fala_registrada + desfecho + contexto_descrito',
+      gravidade: 'normal',
+      peso: 15,
+      critico: false,
+      acao_corretiva_sugerida: 'Treinar frase curta de encerramento com confirmação do próximo passo.',
     },
   ];
+  var codigosStd = specs.map(function (sp) { return sp.codigo; });
+  var codigosRefs = Array.isArray(refs.codigos_matriz_mae) ? refs.codigos_matriz_mae.slice() : [];
+  for (var csi = 0; csi < codigosStd.length; csi++) {
+    if (codigosRefs.indexOf(codigosStd[csi]) < 0) codigosRefs.push(codigosStd[csi]);
+  }
+  if (refs && typeof refs === 'object') {
+    refs.codigos_matriz_mae = geradorCompletarCodigosMatrizMae_(codigosRefs, 'ATD');
+  }
   var out = [];
-  for (var i = 0; i < rows.length; i++) {
-    var row = rows[i];
-    var sp = specs[i] || {};
+  for (var i = 0; i < specs.length; i++) {
+    var sp = specs[i];
+    var row = matrizMaeRowPorCodigoF4_(sp.codigo);
     if (!row) continue;
     var codM = String(row.codigo);
-    var padF = sp.padrao || row.padrao;
     out.push({
+      itemId: sp.id,
       codigo: codM,
       codigo_matriz_mae: codM,
       secao: row.secao,
       dimensao: row.dimensao,
       classificacao: row.classificacao,
-      tipo: String(row.fase4_tipo),
+      tipo: sp.tipo || String(row.fase4_tipo),
       canal: String(row.fase4_canal),
       aplicabilidade: String(row.fase4_aplic),
-      padrao: padF,
-      evidencia_minima: sp.evid || 'evidencia_observada + contexto_descrito',
-      gravidade: sp.grav === 'critica' ? 'critica' : 'importante',
+      padrao: sp.padrao,
+      criterio_aprovacao: sp.criterio_aprovacao,
+      criterio_reprovacao: sp.criterio_reprovacao,
+      criterioAvaliacao:
+        'Aprovar se ' + sp.criterio_aprovacao.charAt(0).toLowerCase() + sp.criterio_aprovacao.slice(1) +
+        ' Reprovar se ' + sp.criterio_reprovacao.charAt(0).toLowerCase() + sp.criterio_reprovacao.slice(1),
+      evidencia_minima: sp.evidencia_minima,
+      tipoAvaliacao: 'binario',
+      peso: sp.peso,
+      obrigatorio: true,
+      critico: sp.critico === true,
+      gravidade: sp.gravidade,
       resultado: 'n/a',
       pontuacao: 'fora_do_calculo',
+      observacoes_avaliador: '',
       observacoes: '',
-      acao_corretiva_padrao: sp.acor || scoreConceitoAcaoCorretivaPadraoPorCodigo_(codM),
+      acao_corretiva_sugerida: sp.acao_corretiva_sugerida,
+      acao_corretiva_padrao: sp.acao_corretiva_sugerida,
       responsavel_correcao: '',
       prazo_correcao: '',
       status_correcao: 'pendente_avaliacao',
       data_reauditoria_prevista: null,
-      comportamento: padF,
-      criterio_aprovacao: sp.cap,
-      criterio_reprovacao: sp.cre,
-      criterioAvaliacao: sp.cap,
+      comportamento: sp.padrao,
     });
   }
   return out;
+}
+
+function geradorConstruirItensAvaliaveisBalcaoFortes_(matrizRefs) {
+  return geradorConstruirStandardsAuditaveisBalcao_(matrizRefs);
 }
 
 function geradorEnriquecerConteudoColaborativoMinimoCrivo_(cj, contract, situacaoIn, erroIn, processoInF4) {
@@ -6125,7 +6221,10 @@ function geradorConstruirItensAvaliaveisDaMatriz_(pop, matrizRefs, ctxOpt) {
   var out = [];
   function pushDeRow(row, grav, comp, cap, cre) {
     var codM = String(row.codigo);
+    var pesoItem = grav === 'critica' ? 25 : 20;
+    var acao = scoreConceitoAcaoCorretivaPadraoPorCodigo_(codM);
     out.push({
+      itemId: 'STD-' + codM,
       codigo: codM,
       codigo_matriz_mae: codM,
       secao: row.secao,
@@ -6136,11 +6235,17 @@ function geradorConstruirItensAvaliaveisDaMatriz_(pop, matrizRefs, ctxOpt) {
       aplicabilidade: String(row.fase4_aplic),
       padrao: comp,
       evidencia_minima: 'Registo em checklist de piso ou evidência equivalente',
+      tipoAvaliacao: 'binario',
+      peso: pesoItem,
+      obrigatorio: true,
+      critico: grav === 'critica',
       gravidade: grav,
-      resultado: '',
-      pontuacao: '',
+      resultado: 'n/a',
+      pontuacao: 'fora_do_calculo',
       observacoes: '',
-      acao_corretiva_padrao: scoreConceitoAcaoCorretivaPadraoPorCodigo_(codM),
+      observacoes_avaliador: '',
+      acao_corretiva_sugerida: acao,
+      acao_corretiva_padrao: acao,
       responsavel_correcao: '',
       prazo_correcao: '',
       status_correcao: 'pendente_avaliacao',
@@ -6148,6 +6253,9 @@ function geradorConstruirItensAvaliaveisDaMatriz_(pop, matrizRefs, ctxOpt) {
       comportamento: comp,
       criterio_aprovacao: cap,
       criterio_reprovacao: cre,
+      criterioAvaliacao:
+        'Aprovar se ' + cap.charAt(0).toLowerCase() + cap.slice(1) +
+        ' Reprovar se ' + cre.charAt(0).toLowerCase() + cre.slice(1),
     });
   }
   if (String(refs.familia_prioritaria || '').toUpperCase() === 'EST') {
@@ -6645,6 +6753,153 @@ function fase4SelfTestQualidadeBlocosBalcao_() {
       conversao_sem_silent_flip: !!(gov.conversao && gov.conversao.aplicada === false),
       alertas: gov.alertas || [],
     },
+  };
+}
+
+/**
+ * Self-test: Etapa 2 — itens avaliáveis do balcão como standards auditáveis fortes.
+ */
+function fase4SelfTestStandardsAuditaveisBalcao_() {
+  var pIn = 'atendimento no balcão';
+  var sIn = 'cliente chega com dúvida';
+  var eIn = 'atendente sugere produto sem entender a necessidade';
+  var contract = {
+    titulo: 'Atendimento ao Cliente na Farmácia',
+    area: 'Atendimento e vendas',
+    processo: pIn,
+    execucao: {
+      o_que_fazer: [
+        'Perguntar em voz audível a dúvida do cliente no balcão antes de qualquer sugestão de produto',
+        'Verificar informação no sistema e na gôndola quando necessário para orientar com segurança',
+        'Encaminhar ao farmacêutico em dúvida fora de OTC',
+      ],
+      tempo: 'imediato',
+      frequencia: 'a cada ocorrência',
+    },
+    controle: {
+      metrica:
+        '90% dos atendimentos com pergunta de necessidade registrada ou audível antes da sugestão, por auditoria quinzenal em 30 dias consecutivos',
+      criterio_sucesso: '95% sem sugestão precoce por amostragem semanal no balcão e registro de exceção quando aplicável',
+      erros_graves: ['Sugerir produto sem ouvir a necessidade completa no balcão.'],
+    },
+  };
+  var normalized = {
+    tipo: 'colaborativo',
+    titulo: contract.titulo,
+    area: contract.area,
+    processo: pIn,
+    conteudoJson: {
+      objetivo:
+        'Garantir que o atendente entenda a necessidade do cliente antes de sugerir produto, reduzindo indicação inadequada e risco no balcão.',
+      regra_de_ouro: 'Em dúvida clínica, legal ou fora de OTC, chamar o farmacêutico antes de concluir o atendimento.',
+      procedimento: contract.execucao.o_que_fazer.slice(),
+      erro_critico: 'Sugerir produto no balcão sem ouvir a dúvida e sem confirmar a necessidade do cliente.',
+      metrica: contract.controle.metrica,
+    },
+  };
+  var f4 = geradorIntegrarFase4PosNormalizacao_({ id: 'f4std' }, 'req-std', normalized, contract, pIn, sIn, eIn, 'critico');
+  var itens = ((normalized.conteudoJson || {}).itens_avaliaveis || []).slice();
+  var tipos = {};
+  var pesos = {};
+  var evids = {};
+  var criticos = 0;
+  var todosCampos = itens.length >= 5;
+  var criteriosGenericos = false;
+  var procedurais = false;
+  var cAvalNorm = {};
+  for (var i = 0; i < itens.length; i++) {
+    var it = itens[i] || {};
+    var acao = String(it.acao_corretiva_sugerida || it.acao_corretiva_padrao || '').trim();
+    if (
+      !it.padrao ||
+      !it.criterio_aprovacao ||
+      !it.criterio_reprovacao ||
+      !it.criterioAvaliacao ||
+      !it.evidencia_minima ||
+      !it.gravidade ||
+      !acao
+    ) {
+      todosCampos = false;
+    }
+    if (crivoCriterioAvaliacaoGenerico_(it.criterioAvaliacao)) criteriosGenericos = true;
+    if (crivoItemPareceEtapaProcedural_(it)) procedurais = true;
+    tipos[String(it.tipo || '')] = true;
+    pesos[String(it.peso)] = true;
+    evids[String(it.evidencia_minima || '')] = true;
+    cAvalNorm[iaBagNorm_(it.criterioAvaliacao || '')] = true;
+    if (it.critico === true || iaBagNorm_(it.gravidade) === 'critica') criticos++;
+  }
+  var tiposOk =
+    tipos.escuta === true &&
+    tipos.clareza === true &&
+    tipos.conducao === true &&
+    tipos.orientacao === true &&
+    tipos.fechamento === true;
+  var pesosOk = Object.keys(pesos).length > 1;
+  var criticidadeOk = criticos >= 1 && criticos < itens.length;
+  var criteriosUnicosOk = Object.keys(cAvalNorm).length > 1;
+  var evidenciasOk = Object.keys(evids).length > 1;
+  var rastreioOk = fase4ValidarItensRastreioMatrizEEnums_(itens, f4.matriz);
+  var crivoItensOk = crivoAvaliarItensAvaliaveis_(itens).ok;
+
+  var ruimGenerico = JSON.parse(JSON.stringify(itens));
+  if (ruimGenerico.length) ruimGenerico[0].criterioAvaliacao = 'Execução conforme descrição da etapa, observável no ponto de venda.';
+  var bloqueiaGenerico = crivoAvaliarItensAvaliaveis_(ruimGenerico).ok === false;
+
+  var ruimProcedural = JSON.parse(JSON.stringify(itens));
+  if (ruimProcedural.length) {
+    ruimProcedural[0].padrao = 'Saudar o cliente no balcão';
+    ruimProcedural[0].comportamento = 'Saudar o cliente no balcão';
+  }
+  var bloqueiaProcedural = crivoAvaliarItensAvaliaveis_(ruimProcedural).ok === false;
+
+  var rBl = fase4SelfTestQualidadeBlocosBalcao_();
+  var rQual = fase4SelfTestQualidadePopAtendimentoBalcao_();
+  var rSan = iaMotorSelfTestContratoGenericoSaneamento_();
+  var rAc = iaMotorSelfTestQaAcaoObservavelCritico_();
+  var rM = iaMotorSelfTestQaMetricaPosPatchFase4_();
+  var rRep = fase4SelfTestReparoCrivoPosGeracao_();
+  var rF4g = fase4SelfTestGeradorMatrizCrivoScore_();
+  var rCr = crivoSelfTestExecucaoPop_();
+  var rSc = scoreSelfTestConceito_();
+  var reg = rBl.ok && rQual.ok && rSan.ok && rAc.ok && rM.ok && rRep.ok && rF4g.ok && rCr.ok && rSc.ok;
+
+  var ok =
+    f4.ok === true &&
+    itens.length >= 5 &&
+    todosCampos &&
+    !criteriosGenericos &&
+    criteriosUnicosOk &&
+    !procedurais &&
+    tiposOk &&
+    pesosOk &&
+    criticidadeOk &&
+    evidenciasOk &&
+    rastreioOk &&
+    crivoItensOk &&
+    bloqueiaGenerico &&
+    bloqueiaProcedural &&
+    reg;
+
+  return {
+    ok: ok,
+    fase4_ok: f4.ok,
+    standards_auditaveis_minimo: itens.length >= 5,
+    campos_por_item: todosCampos,
+    criterio_aprovacao_por_item: itens.every(function (it) { return String(it.criterio_aprovacao || '').trim().length >= 18; }),
+    criterio_reprovacao_por_item: itens.every(function (it) { return String(it.criterio_reprovacao || '').trim().length >= 18; }),
+    evidencia_minima_por_item: itens.every(function (it) { return String(it.evidencia_minima || '').trim().length >= 16; }),
+    acao_corretiva_por_item: itens.every(function (it) { return String(it.acao_corretiva_sugerida || it.acao_corretiva_padrao || '').trim().length >= 18; }),
+    pesos_diferentes: pesosOk,
+    criticidade_coerente: criticidadeOk,
+    item_critico_real: criticos >= 1,
+    criterios_genericos_bloqueados: bloqueiaGenerico,
+    itens_procedurais_bloqueados: bloqueiaProcedural,
+    tipos_esperados: tiposOk,
+    evidencia_nao_repetida_sem_necessidade: evidenciasOk,
+    score_crivo_ok: !!(f4.score_conceito && f4.crivo && f4.crivo.status_crivo === 'aprovado_para_operacao' && crivoItensOk),
+    regressao: reg,
+    detalhe: { tipos: Object.keys(tipos), pesos: Object.keys(pesos), criticos: criticos, itens: itens.length },
   };
 }
 
