@@ -5910,6 +5910,12 @@ function geradorForcarBlocosOperacionaisBalcao_(cj, contract, situacaoIn, erroIn
   void situacaoIn;
   void erroIn;
   if (!cj || typeof cj !== 'object') return;
+  if (geradorCampoTextoMortoF4_(cj.regra_de_ouro)) {
+    cj.regra_de_ouro = 'Perguntar e confirmar a necessidade do cliente antes de sugerir produto no balcão.';
+  }
+  if (geradorCampoTextoMortoF4_(cj.metrica)) {
+    cj.metrica = 'Auditar semanalmente 5 atendimentos e registrar se houve pergunta de esclarecimento antes da sugestão de produto.';
+  }
   cj.checklist = [
     'Reconheceu rapidamente o cliente',
     'Ouviu a dúvida inicial sem interromper',
@@ -9264,27 +9270,155 @@ function popNormalizarStandardAuditavel_(item) {
   return out;
 }
 
-function popTemStandardsAuditaveisFortes_(itens) {
+function popItensAvaliaveisNormalizados_(conteudoOuItens) {
+  var raw = Array.isArray(conteudoOuItens)
+    ? conteudoOuItens
+    : ((conteudoOuItens && (conteudoOuItens.itens_avaliaveis || conteudoOuItens.itensAvaliaveis)) || []);
+  if (!Array.isArray(raw)) return [];
+  return raw.map(function (it) { return popNormalizarStandardAuditavel_(it); });
+}
+
+function popTemStandardsAuditaveisFortes_(conteudoOuItens) {
+  var itens = popItensAvaliaveisNormalizados_(conteudoOuItens);
   if (!Array.isArray(itens) || itens.length < 5) return false;
+  var criterios = {};
+  for (var i = 0; i < itens.length; i++) {
+    var it = itens[i] || {};
+    var criterioLegado = String(it.criterioAvaliacao || '').trim();
+    if (!String(it.itemId || it.codigo || it.codigo_matriz_mae || '').trim()) return false;
+    if (!String(it.padrao || '').trim()) return false;
+    if (!String(it.criterio_aprovacao || '').trim()) return false;
+    if (!String(it.criterio_reprovacao || '').trim()) return false;
+    if (!String(it.evidencia_minima || '').trim()) return false;
+    if (!String(it.gravidade || '').trim()) return false;
+    if (!String(it.acao_corretiva_sugerida || it.acao_corretiva_padrao || '').trim()) return false;
+    if (it.peso == null || it.peso === '') return false;
+    if (!String(it.tipoAvaliacao || '').trim()) return false;
+    if (criterioLegado && crivoCriterioAvaliacaoGenerico_(criterioLegado)) return false;
+    if (crivoItemPareceEtapaProcedural_({ padrao: it.padrao })) return false;
+    if (criterioLegado) criterios[iaBagNorm_(criterioLegado)] = true;
+  }
+  if (Object.keys(criterios).length === 1 && itens.length > 1) {
+    var unico = Object.keys(criterios)[0];
+    if (unico.indexOf('execucao conforme descricao') >= 0 || unico.indexOf('observavel no ponto de venda') >= 0) return false;
+  }
   var chk = crivoAvaliarItensAvaliaveis_(itens);
   return !!(chk && chk.ok);
 }
 
 function popContextoBalcaoSugestaoPrecoce_(normalized) {
   var cj = (normalized && normalized.conteudoJson) || {};
-  return geradorDetectarContextoBalcaoNecessidade_({
-    processo:
-      ((normalized && normalized.processo) || cj.processo || '') +
-      ' ' +
-      ((normalized && normalized.titulo) || cj.titulo || '') +
-      ' ' +
-      (cj.objetivo || ''),
-    situacao: cj.situacao || cj.contexto || '',
-    erro:
-      (cj.erro_critico || cj.erroCritico || cj.erro || '') +
-      ' ' +
-      normalizeStringArray_(cj.procedimento || []).join(' '),
-  });
+  var bloco =
+    ((normalized && normalized.area) || cj.area || '') + ' ' +
+    ((normalized && normalized.processo) || cj.processo || '') + ' ' +
+    ((normalized && normalized.titulo) || cj.titulo || '') + ' ' +
+    (cj.objetivo || '') + ' ' +
+    (cj.escopo || '') + ' ' +
+    (cj.regra_de_ouro || '') + ' ' +
+    (cj.metrica || '') + ' ' +
+    normalizeStringArray_(cj.procedimento || []).join(' ') + ' ' +
+    normalizeStringArray_(cj.checklist || []).join(' ') + ' ' +
+    normalizeStringArray_(cj.checklist_lider || []).join(' ') + ' ' +
+    normalizeStringArray_(cj.como_fazer_bem || cj.comoFazerBem || []).join(' ');
+  var erro =
+    (cj.erro_critico || cj.erroCritico || cj.erro || '') + ' ' +
+    normalizeStringArray_(cj.errosComuns || []).join(' ') + ' ' +
+    normalizeStringArray_(cj.pontosDeAtencao || []).join(' ') + ' ' +
+    normalizeStringArray_(cj.pontos_criticos || []).join(' ');
+  if (geradorDetectarContextoBalcaoNecessidade_({ processo: bloco, situacao: cj.situacao || cj.contexto || '', erro: erro })) return true;
+  var bag = iaBagNorm_(bloco + ' ' + erro);
+  var temAtendimento = bag.indexOf('atendimento') >= 0 || bag.indexOf('balcao') >= 0 || bag.indexOf('cliente') >= 0;
+  var temNecessidade = bag.indexOf('necessidade') >= 0 || bag.indexOf('duvida') >= 0 || bag.indexOf('sugest') >= 0 || bag.indexOf('produto') >= 0;
+  var temRiscoPrecoce = bag.indexOf('precoce') >= 0 || bag.indexOf('antes de sugerir') >= 0 || bag.indexOf('sem entender') >= 0;
+  return !!((temAtendimento && temNecessidade) || temRiscoPrecoce);
+}
+
+function popCriticoGuardDetectarCritico_(normalized) {
+  var cj = (normalized && normalized.conteudoJson) || {};
+  var campos = [
+    normalized && normalized.tipo,
+    normalized && normalized.linhaPop,
+    normalized && normalized.modoPop,
+    cj.tipo,
+    cj.linhaPop,
+    cj.modoPop,
+    cj.modo_documento,
+  ];
+  for (var i = 0; i < campos.length; i++) {
+    if (normalizeTipoPop_(campos[i]) === 'critico') return true;
+  }
+  var gov = iaBagNorm_(cj.governanca_modo || cj.modo_documento || '');
+  if (gov.indexOf('critico') >= 0 || gov.indexOf('risco critico') >= 0 || gov.indexOf('conversao') >= 0) return true;
+  var critOp = normalizeCriticidade_(cj.criticidade_operacional || normalized.criticidade_operacional || normalized.criticidade || '');
+  return (critOp === 'alta' || critOp === 'critica') && (gov.indexOf('risco') >= 0 || gov.indexOf('crit') >= 0);
+}
+
+function popCamposVaziosCriticoF4_(cj) {
+  var faltas = [];
+  if (crivoCampoMortoEssencial_(cj.materiais_epi, { permiteNaoSeAplicaJustificado: true })) faltas.push('materiais_epi');
+  if (!Array.isArray(cj.errosComuns) || cj.errosComuns.length < 1) faltas.push('errosComuns');
+  if (!Array.isArray(cj.pontosDeAtencao) || cj.pontosDeAtencao.length < 1) faltas.push('pontosDeAtencao');
+  if (!Array.isArray(cj.pontos_criticos) || cj.pontos_criticos.length < 1) faltas.push('pontos_criticos');
+  if (!Array.isArray(cj.como_fazer_bem)) faltas.push('como_fazer_bem');
+  return faltas;
+}
+
+function popExemploItemFracoF4_(itens) {
+  if (!Array.isArray(itens) || !itens.length) return {};
+  var it = itens[0] || {};
+  return {
+    itemId: String(it.itemId || it.codigo || ''),
+    descricao: String(it.descricao || it.acao || it.padrao || '').substring(0, 180),
+    criterioAvaliacao: String(it.criterioAvaliacao || '').substring(0, 220),
+  };
+}
+
+function popLogGuardCriticoDiagnostico_(user, normalized, diag) {
+  var cj = (normalized && normalized.conteudoJson) || {};
+  try {
+    logFluxo_(user, {
+      acao: 'pop_critico_guard_diagnostico',
+      etapa: 'persistencia',
+      status: diag && diag.acao_guard === 'bloqueou' ? 'bloqueado' : String((diag && diag.acao_guard) || 'ok'),
+      tipo: normalizeTipoPop_(normalized && normalized.tipo),
+      origem: String((normalized && normalized.origem) || ''),
+      popId: String((normalized && normalized.popId) || ''),
+      mensagem: 'Diagnóstico guard POP crítico Fase 4',
+      payloadResumo: JSON.stringify({
+        tipo_detectado: normalizeTipoPop_(normalized && normalized.tipo),
+        isCritico: !!(diag && diag.isCritico),
+        isBalcao: !!(diag && diag.isBalcao),
+        tem_standards_fortes: !!(diag && diag.tem_standards_fortes),
+        origem_itens: String((diag && diag.origem_itens) || ''),
+        acao_guard: String((diag && diag.acao_guard) || ''),
+        motivo: String((diag && diag.motivo) || ''),
+        quantidade_itens_avaliaveis: Array.isArray(cj.itens_avaliaveis) ? cj.itens_avaliaveis.length : 0,
+        campos_vazios_detectados: (diag && diag.campos_vazios_detectados) || [],
+      }),
+    });
+  } catch (e) {}
+}
+
+function popBloquearDegradacaoCriticoF4_(user, normalized, origemItens, motivo, campos, itensNorm) {
+  try {
+    logFluxo_(user, {
+      acao: 'pop_critico_degradation_blocked',
+      etapa: 'persistencia',
+      status: 'bloqueado',
+      tipo: normalizeTipoPop_(normalized && normalized.tipo),
+      origem: String((normalized && normalized.origem) || ''),
+      popId: String((normalized && normalized.popId) || ''),
+      mensagem: 'Persistência bloqueada para evitar salvar POP crítico legado/fraco',
+      payloadResumo: JSON.stringify({
+        motivo: motivo,
+        origem_itens: origemItens || '',
+        campos_faltantes: campos || [],
+        exemplo_item_fraco: popExemploItemFracoF4_(itensNorm),
+        criterioAvaliacao: String(((itensNorm && itensNorm[0]) || {}).criterioAvaliacao || ''),
+      }),
+    });
+  } catch (e) {}
+  throw new Error('POP crítico sem standards auditáveis fortes. Persistência bloqueada para evitar salvar estrutura legada.');
 }
 
 function popResumoFase4Persistencia_(cj, origemItens, degradacao) {
@@ -9323,12 +9457,10 @@ function popGarantirQualidadeFase4AntesPersistir_(normalized, user, origemLog) {
   if (!normalized || typeof normalized !== 'object') return { origem_itens: '', degradacao: false };
   var cj = normalized.conteudoJson || {};
   normalized.conteudoJson = cj;
-  var isCrit = normalizeTipoPop_(normalized.tipo) === 'critico';
+  var isCrit = popCriticoGuardDetectarCritico_(normalized);
   var isBalcao = popContextoBalcaoSugestaoPrecoce_(normalized);
   var rawItens = cj.itens_avaliaveis || cj.itensAvaliaveis || [];
-  var itensNorm = Array.isArray(rawItens)
-    ? rawItens.map(function (it) { return popNormalizarStandardAuditavel_(it); })
-    : [];
+  var itensNorm = popItensAvaliaveisNormalizados_(rawItens);
   var origemItens = itensNorm.length ? 'fase4' : '';
   var forte = popTemStandardsAuditaveisFortes_(itensNorm);
   var degradacao = false;
@@ -9346,13 +9478,29 @@ function popGarantirQualidadeFase4AntesPersistir_(normalized, user, origemLog) {
     }
   }
 
-  if ((isCrit || isBalcao) && isBalcao && !forte) {
+  if (isCrit && !forte && !isBalcao) {
+    var camposSemContexto = popCamposVaziosCriticoF4_(cj);
+    popLogGuardCriticoDiagnostico_(user, normalized, {
+      isCritico: true,
+      isBalcao: false,
+      tem_standards_fortes: false,
+      origem_itens: origemItens,
+      acao_guard: 'bloqueou',
+      motivo: 'sem_contexto_suficiente_para_reconstruir',
+      campos_vazios_detectados: camposSemContexto,
+    });
+    popBloquearDegradacaoCriticoF4_(user, normalized, origemItens, 'sem_contexto_suficiente_para_reconstruir', camposSemContexto, itensNorm);
+  }
+
+  if (isCrit && isBalcao && !forte) {
     var refs = cj.fase4_matriz_mapeamento || { codigos_matriz_mae: [], familia_prioritaria: 'ATD' };
     itensNorm = geradorConstruirStandardsAuditaveisBalcao_(refs);
     cj.fase4_matriz_mapeamento = refs;
     origemItens = degradacao ? 'normalizador_corrigiu_degradacao' : 'normalizador';
     degradacao = true;
     forte = true;
+    geradorEnriquecerCamposViewerBalcao_(cj);
+    geradorForcarBlocosOperacionaisBalcao_(cj, {}, '', cj.erro_critico || cj.erroCritico || '');
   }
 
   if (itensNorm.length) {
@@ -9360,7 +9508,21 @@ function popGarantirQualidadeFase4AntesPersistir_(normalized, user, origemLog) {
     delete cj.itensAvaliaveis;
   }
 
-  if ((isCrit || isBalcao) && isBalcao) {
+  if (isCrit && !popTemStandardsAuditaveisFortes_(cj.itens_avaliaveis || [])) {
+    var camposFraco = popCamposVaziosCriticoF4_(cj);
+    popLogGuardCriticoDiagnostico_(user, normalized, {
+      isCritico: true,
+      isBalcao: isBalcao,
+      tem_standards_fortes: false,
+      origem_itens: origemItens,
+      acao_guard: 'bloqueou',
+      motivo: 'standards_fracos_apos_normalizacao',
+      campos_vazios_detectados: camposFraco,
+    });
+    popBloquearDegradacaoCriticoF4_(user, normalized, origemItens, 'standards_fracos_apos_normalizacao', camposFraco, itensNorm);
+  }
+
+  if (isCrit && isBalcao) {
     var crivo = avaliarCrivoExecucaoPop_(normalized);
     geradorAplicarMetadadosCrivoNoConteudo_(cj, crivo);
     cj.fase4_score_conceito = calcularScoreExecucaoConceito_(cj.itens_avaliaveis || []);
@@ -9370,6 +9532,17 @@ function popGarantirQualidadeFase4AntesPersistir_(normalized, user, origemLog) {
     }
   }
 
+  if (isCrit) {
+    popLogGuardCriticoDiagnostico_(user, normalized, {
+      isCritico: true,
+      isBalcao: isBalcao,
+      tem_standards_fortes: true,
+      origem_itens: origemItens,
+      acao_guard: degradacao ? 'reconstruiu' : 'preservou',
+      motivo: degradacao ? 'standards_reconstruidos_ou_normalizados' : 'standards_fortes_preservados',
+      campos_vazios_detectados: popCamposVaziosCriticoF4_(cj),
+    });
+  }
   popLogPersistenciaFase4_(user, origemLog || 'pop_critico_payload_pre_save', normalized, origemItens, degradacao);
   return { origem_itens: origemItens, degradacao: degradacao };
 }
@@ -9519,6 +9692,142 @@ function fase4SelfTestRoundTripStandardsPersistencia_() {
     pontosDeAtencao_preservado: Array.isArray(cf.pontosDeAtencao) && cf.pontosDeAtencao.length >= 4,
     como_fazer_bem_lista: Array.isArray(cf.como_fazer_bem),
     payload_legado_fraco_nao_salva_fraco: okFracoCorrigido,
+  };
+}
+
+function fase4SelfTestGuardCriticoSemContexto_() {
+  var user = { nome: 'Teste', perfil: 'admin' };
+  function payloadLegado(base) {
+    var b = base || {};
+    return {
+      tipo: b.tipo || 'critico',
+      titulo: b.titulo || 'POP crítico legado',
+      area: b.area || 'Operação',
+      processo: b.processo || 'processo operacional',
+      conteudoJson: {
+        objetivo: b.objetivo || 'Padronizar uma rotina operacional crítica sem detalhes de atendimento ao cliente.',
+        erro_critico: b.erro_critico || '',
+        procedimento: [
+          {
+            itemId: '1',
+            descricao: 'Conferir a etapa',
+            acao: 'Conferir a etapa',
+            criterioAvaliacao: 'Execução conforme descrição da etapa, observável no ponto de venda.',
+            tipoAvaliacao: 'binario',
+            peso: 1,
+            obrigatorio: true,
+            critico: false,
+          },
+        ],
+        itensAvaliaveis: [
+          {
+            itemId: '1',
+            descricao: 'Conferir a etapa',
+            acao: 'Conferir a etapa',
+            criterioAvaliacao: 'Execução conforme descrição da etapa, observável no ponto de venda.',
+            tipoAvaliacao: 'binario',
+            peso: 1,
+            obrigatorio: true,
+            critico: false,
+          },
+        ],
+        materiais_epi: [],
+        errosComuns: [],
+        pontosDeAtencao: [],
+        pontos_criticos: [],
+        como_fazer_bem: 'Conferir a etapa e registrar conclusão.',
+      },
+    };
+  }
+  function runGuard(p) {
+    var norm = normalizePopJsonPayload_(user, JSON.parse(JSON.stringify(p)));
+    popGarantirQualidadeFase4AntesPersistir_(norm, user, 'selftest_guard_critico');
+    return norm.conteudoJson || {};
+  }
+  function forteOk(c) {
+    return (
+      Array.isArray(c.itens_avaliaveis) &&
+      c.itens_avaliaveis.length >= 5 &&
+      popTemStandardsAuditaveisFortes_(c.itens_avaliaveis) &&
+      String(JSON.stringify(c.itens_avaliaveis)).indexOf('Execução conforme descrição da etapa') < 0
+    );
+  }
+
+  var cBalcao = runGuard(payloadLegado({
+    titulo: 'Atendimento ao Cliente na Farmácia',
+    area: 'Atendimento e vendas',
+    processo: 'atendimento no balcão',
+    objetivo: 'Garantir que a necessidade do cliente seja entendida antes de sugerir produto.',
+    erro_critico: 'Atendente sugere produto antes de entender a necessidade do cliente.',
+  }));
+  var caso1 =
+    forteOk(cBalcao) &&
+    typeof cBalcao.materiais_epi === 'string' &&
+    cBalcao.materiais_epi.indexOf('Não se aplica com justificativa') >= 0 &&
+    Array.isArray(cBalcao.errosComuns) && cBalcao.errosComuns.length >= 4 &&
+    Array.isArray(cBalcao.pontosDeAtencao) && cBalcao.pontosDeAtencao.length >= 4 &&
+    Array.isArray(cBalcao.como_fazer_bem);
+
+  var cErro = runGuard(payloadLegado({
+    titulo: 'Rotina crítica de orientação',
+    area: 'Loja',
+    processo: 'fluxo crítico',
+    objetivo: 'Evitar indicação inadequada em interação de compra.',
+    erro_critico: 'Sugestão precoce de produto sem entender a dúvida ou necessidade do cliente.',
+  }));
+  var caso2 = forteOk(cErro);
+
+  var bloqueou = false;
+  try {
+    runGuard(payloadLegado({
+      titulo: 'Controle crítico interno',
+      area: 'Administrativo',
+      processo: 'arquivo interno',
+      objetivo: 'Padronizar conferência documental interna.',
+      erro_critico: 'Documento interno arquivado sem dupla conferência.',
+    }));
+  } catch (e) {
+    bloqueou = String(e && e.message || e).indexOf('POP crítico sem standards auditáveis fortes') >= 0;
+  }
+
+  var fortes = geradorConstruirStandardsAuditaveisBalcao_({ codigos_matriz_mae: ['ATD-001'], familia_prioritaria: 'ATD' });
+  var cForte = runGuard({
+    tipo: 'critico',
+    titulo: 'Atendimento ao Cliente na Farmácia',
+    area: 'Atendimento e vendas',
+    processo: 'atendimento no balcão',
+    conteudoJson: {
+      objetivo: 'Garantir atendimento seguro no balcão antes de sugerir produto.',
+      erro_critico: 'Atendente sugere produto antes de entender a necessidade.',
+      materiais_epi: 'Não se aplica com justificativa: processo de atendimento verbal no balcão, sem manipulação específica de produto ou procedimento clínico.',
+      errosComuns: ['Indicar produto logo após a primeira frase do cliente', 'Responder por suposição', 'Não diferenciar dúvida', 'Encerrar sem próximo passo'],
+      pontosDeAtencao: ['Cliente inseguro', 'Pressa não justifica sugestão', 'Dúvida simples não é técnica', 'Risco exige farmacêutico'],
+      pontos_criticos: ['Sugestão precoce', 'Improviso técnico', 'Sem próximo passo', 'Falha de escuta'],
+      como_fazer_bem: ['Perguntar antes de sugerir', 'Confirmar entendimento'],
+      status_crivo: 'aprovado_para_operacao',
+      fase4_score_conceito: { score_geral: 100 },
+      itens_avaliaveis: fortes,
+    },
+  });
+  var caso4 = forteOk(cForte) && cForte.itens_avaliaveis[0].itemId === fortes[0].itemId;
+
+  var cNaoCritico = runGuard(payloadLegado({
+    tipo: 'colaborativo',
+    titulo: 'Atendimento ao Cliente na Farmácia',
+    area: 'Atendimento e vendas',
+    processo: 'atendimento no balcão',
+    objetivo: 'Orientar atendimento no balcão em rotina antiga.',
+    erro_critico: 'Sugestão precoce de produto sem entender a necessidade.',
+  }));
+  var caso5 = !Array.isArray(cNaoCritico.itens_avaliaveis) || cNaoCritico.itens_avaliaveis.length < 5;
+
+  return {
+    ok: caso1 && caso2 && bloqueou && caso4 && caso5,
+    critico_legado_balcao_reconstruido: caso1,
+    critico_legado_erro_critico_reconstruido: caso2,
+    critico_legado_sem_contexto_bloqueado: bloqueou,
+    critico_com_standards_preservado: caso4,
+    pop_antigo_legado_nao_critico_preservado: caso5,
   };
 }
 
