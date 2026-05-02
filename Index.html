@@ -5253,6 +5253,97 @@
       return '<ul>' + items.map(item => '<li>' + escapeHtml(listItemToText_(item)) + '</li>').join('') + '</ul>';
     }
 
+    function viewerTextoUtil_(value) {
+      const s = viewerCampoLegivel_(value).trim();
+      if (!s) return '';
+      const bag = s.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/\s+/g, ' ').trim();
+      if (bag === 'nao informado' || bag === 'nao se aplica' || bag === 'n/a') return '';
+      return s;
+    }
+
+    function viewerTemConteudoUtil_(value) {
+      if (Array.isArray(value)) return value.some(function (x) { return !!viewerTextoUtil_(x); });
+      return !!viewerTextoUtil_(value);
+    }
+
+    function splitOrientacoesViewer_(value) {
+      if (Array.isArray(value)) return value.map(listItemToText_).map(function (x) { return String(x || '').trim(); }).filter(Boolean);
+      const raw = viewerTextoUtil_(value);
+      if (!raw) return [];
+      return raw
+        .split(/\r?\n|(?:\s*[·•]\s*)|(?:\s*;\s*)|(?:,\s+(?=[A-ZÁÉÍÓÚÂÊÔÃÕÇ]))/g)
+        .map(function (x) { return String(x || '').trim(); })
+        .filter(Boolean);
+    }
+
+    function renderListBlockIfUseful_(title, value) {
+      if (!viewerTemConteudoUtil_(value)) return '';
+      return '<div class="doc-block"><h2>' + escapeHtml(title) + '</h2>' + arrayToHtml(value) + '</div>';
+    }
+
+    function renderTextBlockIfUseful_(title, value, extraClass) {
+      const text = viewerTextoUtil_(value);
+      if (!text) return '';
+      return '<div class="doc-block' + (extraClass ? ' ' + extraClass : '') + '"><h2>' + escapeHtml(title) + '</h2><p>' + escapeHtml(text) + '</p></div>';
+    }
+
+    function renderCardIfUseful_(title, value) {
+      if (!viewerTemConteudoUtil_(value)) return '';
+      return '<div class="doc-card"><h3>' + escapeHtml(title) + '</h3>' + arrayToHtml(value) + '</div>';
+    }
+
+    function renderComoFazerBemHtml_(value) {
+      const itens = splitOrientacoesViewer_(value);
+      if (!itens.length) return '';
+      return '<div class="doc-block"><h2>Como fazer bem</h2><ul>' + itens.map(function (x) { return '<li>' + escapeHtml(x) + '</li>'; }).join('') + '</ul></div>';
+    }
+
+    function renderRascunhoAlertHtml_(pop) {
+      const st = popJourneyNormalizeStatus_(pop && pop.status);
+      if (st !== 'rascunho') return '';
+      return (
+        '<div class="doc-alert" style="border-color:#b45309;background:#fffbeb;color:#78350f;">' +
+        '<strong>RASCUNHO — ainda não vigente para treinamento oficial da equipe.</strong><br>' +
+        'Use este documento apenas para revisão até a publicação da versão vigente.' +
+        '</div>'
+      );
+    }
+
+    function renderRecursosRelacionadosHtml_(pop) {
+      const links = [];
+      const anexos = renderLinksBlock('Anexos (arquivos / links)', pop.anexos);
+      const docs = renderLinksBlock('Documentos — links reais', pop.documentosRelacionados);
+      const forms = renderLinksBlock('Formulários — links reais', pop.formulariosRelacionados);
+      if (viewerTemConteudoUtil_(pop.anexos) && anexos.indexOf('Não informado') < 0) links.push(anexos);
+      if (viewerTemConteudoUtil_(pop.documentosRelacionados) && docs.indexOf('Não informado') < 0) links.push(docs);
+      const docsRefs = renderReferenciasTextuais('Documentos — referência textual', pop.documentosRelacionadosReferencias || []);
+      if (docsRefs) links.push(docsRefs);
+      if (viewerTemConteudoUtil_(pop.formulariosRelacionados) && forms.indexOf('Não informado') < 0) links.push(forms);
+      const formsRefs = renderReferenciasTextuais('Formulários — referência textual', pop.formulariosRelacionadosReferencias || []);
+      if (formsRefs) links.push(formsRefs);
+      if (!links.length) return '';
+      return '<div class="doc-card"><h3>Recursos relacionados</h3>' + links.join('') + '</div>';
+    }
+
+    function renderMetadadosDocumentoHtml_(pop) {
+      const rows = [];
+      if (viewerTextoUtil_(pop.resumoAlteracao)) rows.push('<li><strong>Resumo da alteração:</strong> ' + escapeHtml(viewerTextoUtil_(pop.resumoAlteracao)) + '</li>');
+      if (viewerTextoUtil_(pop.motivoRevisao)) rows.push('<li><strong>Motivo da revisão:</strong> ' + escapeHtml(viewerTextoUtil_(pop.motivoRevisao)) + '</li>');
+      rows.push('<li><strong>Público-alvo:</strong> ' + escapeHtml(viewerCampoLegivel_(pop.publicoAlvo || 'todos')) + '</li>');
+      rows.push('<li><strong>Leitura obrigatória:</strong> ' + (pop.leituraObrigatoria ? 'Sim' : 'Não') + '</li>');
+      rows.push('<li><strong>Treinamento obrigatório:</strong> ' + (pop.treinamentoObrigatorio ? 'Sim' : 'Não') + '</li>');
+      rows.push('<li><strong>Criticidade:</strong> ' + escapeHtml(viewerCampoLegivel_(pop.criticidade || 'media')) + '</li>');
+      return '<div class="doc-card"><h3>Metadados do documento</h3><ul>' + rows.join('') + '</ul></div>';
+    }
+
+    function renderProcedimentoApoioHtml_(items) {
+      if (!viewerTemConteudoUtil_(items)) return '';
+      return (
+        '<details class="doc-block" open><summary><strong>Etapas principais</strong> <span class="muted">apoio operacional</span></summary>' +
+        '<div style="margin-top:12px;">' + arrayToHtml(items) + '</div></details>'
+      );
+    }
+
     function humanizeFrequenciaCritico_(v) {
       const s = String(v || '').trim();
       if (s === 'diario') return 'Diário';
@@ -5265,87 +5356,39 @@
       const arr = Array.isArray(items) ? items : [];
       if (!arr.length) return '<div class="doc-block"><h2>Itens avaliáveis</h2><p class="empty-text">Não informado.</p></div>';
       if (temStandardsAuditaveis_(arr)) {
-        const rowsStd = arr
+        const cardsStd = arr
           .map(function (it) {
             return (
-              '<tr><td>' +
-              escapeHtml(viewerCampoLegivel_(it.itemId || it.codigo || it.codigo_matriz_mae)) +
-              '</td><td>' +
-              escapeHtml(viewerCampoLegivel_(it.secao)) +
-              '</td><td>' +
-              escapeHtml(viewerCampoLegivel_(it.dimensao)) +
-              '</td><td>' +
-              escapeHtml(viewerCampoLegivel_(it.classificacao)) +
-              '</td><td>' +
-              escapeHtml(viewerCampoLegivel_(it.tipo)) +
-              '</td><td>' +
-              escapeHtml(viewerCampoLegivel_(it.canal)) +
-              '</td><td>' +
-              escapeHtml(viewerCampoLegivel_(it.aplicabilidade)) +
-              '</td><td>' +
-              escapeHtml(viewerCampoLegivel_(it.padrao)) +
-              '</td><td>' +
-              escapeHtml(viewerCampoLegivel_(it.criterio_aprovacao || it.criterioAprovacao)) +
-              '</td><td>' +
-              escapeHtml(viewerCampoLegivel_(it.criterio_reprovacao || it.criterioReprovacao)) +
-              '</td><td>' +
-              escapeHtml(viewerCampoLegivel_(it.evidencia_minima)) +
-              '</td><td>' +
-              escapeHtml(viewerCampoLegivel_(it.gravidade)) +
-              '</td><td>' +
-              escapeHtml(viewerCampoLegivel_(it.peso)) +
-              '</td><td>' +
-              (it.critico ? 'Sim' : 'Não') +
-              '</td><td>' +
-              escapeHtml(viewerCampoLegivel_(it.acao_corretiva_sugerida || it.acao_corretiva_padrao)) +
-              '</td></tr>'
+              '<article class="doc-card" style="margin-bottom:14px;border-left:4px solid #1d4ed8;">' +
+              '<h3>' + escapeHtml(viewerCampoLegivel_(it.itemId || it.codigo || it.codigo_matriz_mae)) + '</h3>' +
+              '<p><strong>Padrão:</strong> ' + escapeHtml(viewerCampoLegivel_(it.padrao)) + '</p>' +
+              '<div class="doc-meta-grid" style="margin:12px 0;">' +
+              '<div><span>Seção</span><strong>' + escapeHtml(viewerCampoLegivel_(it.secao)) + '</strong></div>' +
+              '<div><span>Dimensão</span><strong>' + escapeHtml(viewerCampoLegivel_(it.dimensao)) + '</strong></div>' +
+              '<div><span>Classificação</span><strong>' + escapeHtml(viewerCampoLegivel_(it.classificacao)) + '</strong></div>' +
+              '<div><span>Tipo</span><strong>' + escapeHtml(viewerCampoLegivel_(it.tipo)) + '</strong></div>' +
+              '<div><span>Canal</span><strong>' + escapeHtml(viewerCampoLegivel_(it.canal)) + '</strong></div>' +
+              '<div><span>Aplicabilidade</span><strong>' + escapeHtml(viewerCampoLegivel_(it.aplicabilidade)) + '</strong></div>' +
+              '<div><span>Gravidade</span><strong>' + escapeHtml(viewerCampoLegivel_(it.gravidade)) + '</strong></div>' +
+              '<div><span>Peso</span><strong>' + escapeHtml(viewerCampoLegivel_(it.peso)) + '</strong></div>' +
+              '<div><span>Crítico</span><strong>' + (it.critico ? 'Sim' : 'Não') + '</strong></div>' +
+              '</div>' +
+              '<p><strong>Critério de aprovação:</strong> ' + escapeHtml(viewerCampoLegivel_(it.criterio_aprovacao || it.criterioAprovacao)) + '</p>' +
+              '<p><strong>Critério de reprovação:</strong> ' + escapeHtml(viewerCampoLegivel_(it.criterio_reprovacao || it.criterioReprovacao)) + '</p>' +
+              '<p><strong>Evidência mínima:</strong> ' + escapeHtml(viewerCampoLegivel_(it.evidencia_minima)) + '</p>' +
+              '<p><strong>Ação corretiva sugerida:</strong> ' + escapeHtml(viewerCampoLegivel_(it.acao_corretiva_sugerida || it.acao_corretiva_padrao)) + '</p>' +
+              '</article>'
             );
           })
           .join('');
         return (
           '<div class="doc-block"><h2>Standards auditáveis</h2>' +
-          '<div style="overflow-x:auto"><table class="pop-crit-view-table"><thead><tr>' +
-          '<th>Item/código</th><th>Seção</th><th>Dimensão</th><th>Classificação</th><th>Tipo</th><th>Canal</th><th>Aplicabilidade</th>' +
-          '<th>Padrão</th><th>Critério de aprovação</th><th>Critério de reprovação</th><th>Evidência mínima</th><th>Gravidade</th><th>Peso</th><th>Crítico</th><th>Ação corretiva sugerida</th>' +
-          '</tr></thead><tbody>' +
-          rowsStd +
-          '</tbody></table></div></div>'
+          '<p class="muted">Camada principal de auditoria e gestão do POP crítico.</p>' +
+          cardsStd +
+          '</div>'
         );
       }
-      const rows = arr
-        .map(function (it) {
-          return (
-            '<tr><td>' +
-            escapeHtml(viewerCampoLegivel_(it.itemId)) +
-            '</td><td>' +
-            escapeHtml(viewerCampoLegivel_(it.etapa)) +
-            '</td><td>' +
-            escapeHtml(viewerCampoLegivel_(it.descricao)) +
-            '</td><td>' +
-            escapeHtml(viewerCampoLegivel_(it.acao)) +
-            '</td><td>' +
-            escapeHtml(viewerCampoLegivel_(it.criterioAvaliacao)) +
-            '</td><td>' +
-            escapeHtml(viewerCampoLegivel_(it.tipoAvaliacao || 'binario')) +
-            '</td><td>' +
-            escapeHtml(viewerCampoLegivel_(it.peso)) +
-            '</td><td>' +
-            (it.obrigatorio ? 'Sim' : 'Não') +
-            '</td><td>' +
-            (it.critico ? 'Sim' : 'Não') +
-            '</td></tr>'
-          );
-        })
-        .join('');
-      return (
-        '<div class="doc-block"><h2>Itens avaliáveis</h2>' +
-        '<div style="overflow-x:auto"><table class="pop-crit-view-table"><thead><tr>' +
-        '<th>itemId</th><th>etapa</th><th>descricao</th><th>acao</th><th>criterioAvaliacao</th>' +
-        '<th>tipoAvaliacao</th><th>peso</th><th>obrigatorio</th><th>critico</th>' +
-        '</tr></thead><tbody>' +
-        rows +
-        '</tbody></table></div></div>'
-      );
+      return renderProcedimentoApoioHtml_(arr);
     }
 
     function viewerUserId_() {
@@ -5745,7 +5788,6 @@
         : '';
 
       let html = '';
-      html += renderPopJourneyFullHtml_(pop);
       html += '<div class="doc-container">';
 
       html += '<div class="doc-header">';
@@ -5769,39 +5811,18 @@
       html += '</div>';
       html += '</div>';
 
+      html += renderRascunhoAlertHtml_(pop);
       html += '<div class="doc-alert"><strong>Documento controlado.</strong> Utilize sempre a versão vigente no portal.<br><br><strong>Leitura:</strong> ' +
         (pop.lido ? 'Lido em: ' + escapeHtml(formatDateTime(pop.dataLeitura)) : 'Pendente') +
         '</div>';
+      html += renderPopJourneyFullHtml_(pop);
 
+      const recursosHtml = renderRecursosRelacionadosHtml_(pop);
       html += '<div class="doc-grid">';
-      html += '<div class="doc-card"><h3>Metadados do documento</h3><ul>';
-      html += '<li><strong>Resumo da alteração:</strong> ' + escapeHtml(viewerCampoLegivel_(pop.resumoAlteracao)) + '</li>';
-      html += '<li><strong>Motivo da revisão:</strong> ' + escapeHtml(viewerCampoLegivel_(pop.motivoRevisao)) + '</li>';
-      html += '<li><strong>Público-alvo:</strong> ' + escapeHtml(viewerCampoLegivel_(pop.publicoAlvo || 'todos')) + '</li>';
-      html += '<li><strong>Leitura obrigatória:</strong> ' + (pop.leituraObrigatoria ? 'Sim' : 'Não') + '</li>';
-      html += '<li><strong>Treinamento obrigatório:</strong> ' + (pop.treinamentoObrigatorio ? 'Sim' : 'Não') + '</li>';
-      html += '<li><strong>Criticidade:</strong> ' + escapeHtml(viewerCampoLegivel_(pop.criticidade || 'media')) + '</li>';
-      html += '</ul></div>';
-
-      html += '<div class="doc-card"><h3>Recursos relacionados</h3>';
-      html += renderLinksBlock('Anexos (arquivos / links)', pop.anexos);
-      html += renderLinksBlock('Documentos — links reais', pop.documentosRelacionados);
-      html += renderReferenciasTextuais('Documentos — referência textual', pop.documentosRelacionadosReferencias || []);
-      html += renderLinksBlock('Formulários — links reais', pop.formulariosRelacionados);
-      html += renderReferenciasTextuais('Formulários — referência textual', pop.formulariosRelacionadosReferencias || []);
-      html += '</div>';
+      html += renderMetadadosDocumentoHtml_(pop);
+      if (recursosHtml) html += recursosHtml;
       html += '</div>';
 
-      html += '<div class="doc-block"><h2>Diretriz executiva</h2><p>' + (escapeHtml(viewerCampoLegivel_(c.diretriz_executiva)) || 'Não informado.') + '</p></div>';
-      html += '<div class="doc-block"><h2>Objetivo</h2><p>' + (escapeHtml(viewerCampoLegivel_(c.objetivo)) || 'Não informado.') + '</p></div>';
-      html += '<div class="doc-block"><h2>Escopo</h2><p>' + (escapeHtml(viewerCampoLegivel_(c.escopo)) || 'Não informado.') + '</p></div>';
-
-      html += '<div class="doc-grid">';
-      html += '<div class="doc-card"><h3>Responsáveis</h3>' + arrayToHtml(c.responsaveis) + '</div>';
-      html += '<div class="doc-card"><h3>Materiais / EPI</h3>' + arrayToHtml(c.materiais_epi) + '</div>';
-      html += '</div>';
-
-      html += '<div class="doc-block highlight-block"><h2>Regra de ouro</h2><p>' + (escapeHtml(viewerCampoLegivel_(c.regra_de_ouro)) || 'Não informado.') + '</p></div>';
       const standardsViewer = standardsAuditaveisDoConteudo_(c);
       const fase4SemStandards =
         String(pop.tipo || '').toLowerCase() === 'critico' &&
@@ -5810,49 +5831,58 @@
       const critViewer =
         standardsViewer.length > 0 ||
         (String(pop.tipo || '').toLowerCase() === 'critico' && isCriticoProcedimentoItemsUi_(c.procedimento));
+      const checklistViewer = Array.isArray(c.checklist) && c.checklist.length ? c.checklist : checklist;
+
+      html += renderTextBlockIfUseful_('Diretriz executiva', c.diretriz_executiva);
+      html += renderTextBlockIfUseful_('Regra de ouro', c.regra_de_ouro, 'highlight-block');
+      html += renderTextBlockIfUseful_('Erro crítico', c.erro_critico || c.erroCritico, 'highlight-block');
       if (fase4SemStandards) {
         html +=
           '<div class="doc-block" style="border-color:#b91c1c;background:#fff5f5;"><h2>Estado técnico inválido</h2>' +
           '<p>POP crítico Fase 4 sem standards auditáveis preservados. Revise a persistência antes de usar este documento no piso.</p></div>';
       } else if (critViewer) {
-        html +=
-          '<div class="doc-block"><h2>Frequência</h2><p>' +
-          (escapeHtml(viewerCampoLegivel_(humanizeFrequenciaCritico_(c.frequencia))) || 'Não informado.') +
-          '</p></div>';
-        html += renderCriticoProcedimentoViewerHtml_(standardsViewer.length ? standardsViewer : c.procedimento);
+        if (standardsViewer.length) html += renderCriticoProcedimentoViewerHtml_(standardsViewer);
       } else {
-        html += '<div class="doc-block"><h2>Frequência</h2><p>' + (escapeHtml(viewerCampoLegivel_(c.frequencia)) || 'Não informado.') + '</p></div>';
-        html += '<div class="doc-block"><h2>Procedimento</h2>' + arrayToHtml(c.procedimento) + '</div>';
+        html += renderTextBlockIfUseful_('Frequência', c.frequencia);
       }
+      html += renderListBlockIfUseful_('Checklist operacional', checklistViewer);
+      html += renderComoFazerBemHtml_(c.como_fazer_bem || c.comoFazerBem);
+      html += renderProcedimentoApoioHtml_(c.procedimento);
+      html += renderTextBlockIfUseful_('Frequência', humanizeFrequenciaCritico_(c.frequencia));
+      html += renderTextBlockIfUseful_('Objetivo', c.objetivo);
+      html += renderTextBlockIfUseful_('Escopo', c.escopo);
 
-      html += '<div class="doc-grid">';
-      html += '<div class="doc-card"><h3>Erros comuns</h3>' + arrayToHtml(c.errosComuns) + '</div>';
-      html += '<div class="doc-card"><h3>Pontos de atenção</h3>' + arrayToHtml(c.pontosDeAtencao) + '</div>';
-      html += '</div>';
+      const respMat = [];
+      const respHtml = renderCardIfUseful_('Responsáveis', c.responsaveis);
+      if (respHtml) respMat.push(respHtml);
+      const matHtml = renderCardIfUseful_('Materiais / EPI', c.materiais_epi);
+      if (matHtml) respMat.push(matHtml);
+      if (respMat.length) html += '<div class="doc-grid">' + respMat.join('') + '</div>';
 
-      html += '<div class="doc-grid">';
-      html += '<div class="doc-card"><h3>Proibido</h3>' + arrayToHtml(c.proibido) + '</div>';
-      html += '<div class="doc-card"><h3>Pontos críticos</h3>' + arrayToHtml(c.pontos_criticos) + '</div>';
-      html += '</div>';
+      const errosAtencao = [];
+      const errosHtml = renderCardIfUseful_('Erros comuns', c.errosComuns);
+      if (errosHtml) errosAtencao.push(errosHtml);
+      const pontosAtencaoHtml = renderCardIfUseful_('Pontos de atenção', c.pontosDeAtencao);
+      if (pontosAtencaoHtml) errosAtencao.push(pontosAtencaoHtml);
+      if (errosAtencao.length) html += '<div class="doc-grid">' + errosAtencao.join('') + '</div>';
 
-      html += '<div class="doc-block"><h2>Checklist do líder</h2>' + arrayToHtml(c.checklist_lider) + '</div>';
-      html += '<div class="doc-block"><h2>Checklist operacional</h2>' + arrayToHtml(checklist) + '</div>';
+      const proibCrit = [];
+      const proibHtml = renderCardIfUseful_('Proibido', c.proibido);
+      if (proibHtml) proibCrit.push(proibHtml);
+      const pontosCriticosHtml = renderCardIfUseful_('Pontos críticos', c.pontos_criticos);
+      if (pontosCriticosHtml) proibCrit.push(pontosCriticosHtml);
+      if (proibCrit.length) html += '<div class="doc-grid">' + proibCrit.join('') + '</div>';
 
-      html += '<div class="doc-grid">';
-      html += '<div class="doc-card"><h3>Desvios / ação corretiva</h3>' + arrayToHtml(c.desvios) + '</div>';
-      html += '<div class="doc-card"><h3>Métrica / verificação</h3><p>' + (escapeHtml(viewerCampoLegivel_(c.metrica)) || 'Não informado.') + '</p></div>';
-      html += '</div>';
+      html += renderListBlockIfUseful_('Checklist do líder', c.checklist_lider);
 
-      html += '<div class="doc-block"><h2>Treinamento</h2><p>' + (escapeHtml(viewerCampoLegivel_(c.treinamento)) || 'Não informado.') + '</p></div>';
-      html +=
-        '<div class="doc-grid" style="margin-top:14px;">' +
-        '<div class="doc-card"><h3>Como fazer bem</h3><p>' +
-        (escapeHtml(viewerCampoLegivel_(c.como_fazer_bem || c.comoFazerBem)) || 'Não informado.') +
-        '</p></div>' +
-        '<div class="doc-card"><h3>Erro crítico</h3><p>' +
-        (escapeHtml(viewerCampoLegivel_(c.erro_critico || c.erroCritico)) || 'Não informado.') +
-        '</p></div>' +
-        '</div>';
+      const desvMetrica = [];
+      const desviosHtml = renderCardIfUseful_('Desvios / ação corretiva', c.desvios);
+      if (desviosHtml) desvMetrica.push(desviosHtml);
+      const metricaText = viewerTextoUtil_(c.metrica);
+      if (metricaText) desvMetrica.push('<div class="doc-card"><h3>Métrica / verificação</h3><p>' + escapeHtml(metricaText) + '</p></div>');
+      if (desvMetrica.length) html += '<div class="doc-grid">' + desvMetrica.join('') + '</div>';
+
+      html += renderTextBlockIfUseful_('Treinamento', c.treinamento);
       html += '<p class="muted" style="margin-top:12px;">Use o botão <strong>Confirmar leitura</strong> no topo da página para registrar leitura obrigatória (ação separada de apenas visualizar o POP).</p>';
 
       html += '</div>';
