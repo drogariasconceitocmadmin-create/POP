@@ -1921,6 +1921,16 @@ function popNormalizarProcedimentoApoioCritico_(sources) {
       }
     }
   }
+  /** Aceita array de strings/objetos ou texto com quebras de linha (ex.: `etapas` / etapas_principais vindos da UI). */
+  function consumeFlexibleField_(fld) {
+    if (fld == null || fld === '') return;
+    if (typeof fld === 'string') {
+      var linesStr = String(fld).split(/\r?\n/);
+      for (var k = 0; k < linesStr.length; k++) pushLine(linesStr[k]);
+      return;
+    }
+    consumeArray(fld);
+  }
   var pr = sources.procedimentoRaw;
   if (typeof pr === 'string') {
     var lines = String(pr).split(/\r?\n/);
@@ -1928,8 +1938,9 @@ function popNormalizarProcedimentoApoioCritico_(sources) {
   } else if (Array.isArray(pr)) {
     consumeArray(pr);
   }
-  consumeArray(sources.procedimento_apoio);
-  consumeArray(sources.etapas_principais);
+  consumeFlexibleField_(sources.procedimento_apoio);
+  consumeFlexibleField_(sources.etapas_principais);
+  consumeFlexibleField_(sources.etapas);
   return out;
 }
 
@@ -1969,6 +1980,7 @@ function validatePopCritico_(normalized) {
     procedimentoRaw: cj.procedimento,
     procedimento_apoio: cj.procedimento_apoio,
     etapas_principais: cj.etapas_principais,
+    etapas: cj.etapas,
   });
 }
 
@@ -7739,6 +7751,7 @@ function validatePopCriticoListaErros_(normalized) {
     procedimentoRaw: cj.procedimento,
     procedimento_apoio: cj.procedimento_apoio,
     etapas_principais: cj.etapas_principais,
+    etapas: cj.etapas,
   });
   return out;
 }
@@ -9281,6 +9294,7 @@ function normalizePopJsonPayload_(user, incoming) {
             procedimentoRaw: procedimentoRaw,
             procedimento_apoio: obj.procedimento_apoio !== undefined ? obj.procedimento_apoio : contentCandidate.procedimento_apoio,
             etapas_principais: obj.etapas_principais !== undefined ? obj.etapas_principais : contentCandidate.etapas_principais,
+            etapas: obj.etapas !== undefined ? obj.etapas : contentCandidate.etapas,
           })
         : normalizeProcedimentoCriticoLista_(Array.isArray(procedimentoRaw) ? procedimentoRaw : [])
       : normalizeStringArray_(procedimentoRaw !== undefined && procedimentoRaw !== null ? procedimentoRaw : []);
@@ -9772,6 +9786,25 @@ function fase4SelfTestProcedimentoApoioCritico_() {
   var cAp = nApoio.conteudoJson || {};
   var caso2 = vApoio.ok && cAp.procedimento.join('').indexOf('esclarecimento') >= 0;
 
+  var nEtapasCampo = normalizePopJsonPayload_(
+    user,
+    JSON.parse(
+      JSON.stringify(
+        Object.assign({}, baseCritFreq(), {
+          procedimento: [],
+          etapas: 'Registrar pergunta em voz alta no balcão em até 120 segundos\nConfirmar checklist sim/não antes da sugestão de produto',
+        })
+      )
+    )
+  );
+  var vEtapasCampo = tryCrit(nEtapasCampo);
+  var cEtap = nEtapasCampo.conteudoJson || {};
+  var casoEtap =
+    vEtapasCampo.ok &&
+    Array.isArray(cEtap.procedimento) &&
+    cEtap.procedimento.length >= 2 &&
+    cEtap.procedimento.join('|').indexOf('checklist') >= 0;
+
   var nVazio = normalizePopJsonPayload_(
     user,
     JSON.parse(JSON.stringify(Object.assign({}, baseCritFreq(), { procedimento: [], procedimento_apoio: [], etapas_principais: [] })))
@@ -9848,12 +9881,14 @@ function fase4SelfTestProcedimentoApoioCritico_() {
     ok:
       caso1 &&
       caso2 &&
+      casoEtap &&
       vVazio.ok &&
       caso4 &&
       caso5 &&
       reg,
     critico_strings_ok: caso1,
     critico_procedimento_apoio_ok: caso2,
+    critico_etapas_campo_ok: casoEtap,
     critico_procedimento_vazio_com_standards_ok: vVazio.ok,
     critico_sem_standards_bloqueado: caso4,
     colaborativo_procedimento_preservado: caso5,
