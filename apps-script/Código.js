@@ -5497,6 +5497,7 @@ function fase4EnumsAplicabilidadeItem_() {
     'quando_houver_entrada_de_cliente',
     'quando_houver_fluxo_no_salao',
     'quando_houver_atendimento_no_balcao',
+    'quando_houver_atendimento_no_balcao_com_risco_receita_duvida_tecnica_ou_inseguranca',
     'quando_houver_receita',
     'quando_houver_atendimento_farmaceutico',
     'quando_houver_espera_ou_consulta_de_estoque',
@@ -5583,7 +5584,7 @@ function matrizMaeCatalogoConceito_() {
       padrao: 'Encaminhar ao farmacêutico quando a dúvida exceder OTC ou houver risco',
       fase4_tipo: 'orientacao',
       fase4_canal: 'presencial',
-      fase4_aplic: 'quando_houver_atendimento_farmaceutico',
+      fase4_aplic: 'quando_houver_atendimento_no_balcao_com_risco_receita_duvida_tecnica_ou_inseguranca',
     },
     {
       codigo: 'ATD-003',
@@ -5865,6 +5866,31 @@ function geradorDetectarContextoBalcaoNecessidade_(ctx) {
   );
 }
 
+function geradorBalcaoErroCriticoBriefingCanonico_(texto) {
+  var bag = iaBagNorm_(texto || '');
+  var mencionaSugestaoProduto =
+    (bag.indexOf('suger') >= 0 || bag.indexOf('recomendar') >= 0 || bag.indexOf('indic') >= 0) &&
+    bag.indexOf('produto') >= 0;
+  var mencionaNecessidade =
+    bag.indexOf('necessidade') >= 0 ||
+    bag.indexOf('entender') >= 0 ||
+    bag.indexOf('esclarec') >= 0 ||
+    bag.indexOf('duvida') >= 0;
+  var erroGenericoDesalinhado =
+    bag.indexOf('sem resposta') >= 0 ||
+    bag.indexOf('sem olhar') >= 0 ||
+    bag.indexOf('nao buscar produto') >= 0 ||
+    bag.indexOf('nao procura produto') >= 0;
+  if ((mencionaSugestaoProduto && mencionaNecessidade) || erroGenericoDesalinhado) {
+    return 'Sugerir produto sem entender a necessidade do cliente antes de fazer perguntas de esclarecimento.';
+  }
+  return '';
+}
+
+function geradorBalcaoFrequenciaEvento_() {
+  return 'Sempre que houver atendimento no balcão com dúvida, necessidade de orientação, busca por produto ou insegurança antes da compra.';
+}
+
 /**
  * @param {Object} cj conteudoJson
  */
@@ -5877,6 +5903,15 @@ function geradorEnriquecerCamposViewerBalcao_(cj) {
   if (geradorCampoTextoMortoF4_(cj.escopo)) {
     cj.escopo =
       'Aplica-se a atendimentos presenciais no balcão em que o cliente apresenta dúvida, necessidade de orientação, busca por produto ou insegurança antes da compra.';
+  }
+  var fqBag = iaBagNorm_(cj.frequencia || '');
+  if (
+    geradorCampoTextoMortoF4_(cj.frequencia) ||
+    fqBag === 'diario' ||
+    fqBag === 'por demanda' ||
+    fqBag === 'a cada ocorrencia'
+  ) {
+    cj.frequencia = geradorBalcaoFrequenciaEvento_();
   }
   if (!Array.isArray(cj.responsaveis) || cj.responsaveis.length < 2) {
     cj.responsaveis = ['Atendente de balcão', 'Farmacêutico de plantão', 'Líder ou gerente da loja'];
@@ -5906,16 +5941,43 @@ function geradorEnriquecerCamposViewerBalcao_(cj) {
  * @param {string} erroIn
  */
 function geradorForcarBlocosOperacionaisBalcao_(cj, contract, situacaoIn, erroIn) {
-  void contract;
   void situacaoIn;
-  void erroIn;
   if (!cj || typeof cj !== 'object') return;
+  var c = contract || {};
+  var errosGravesContrato = ((c.controle || {}).erros_graves || []);
+  var errosGravesTexto = Array.isArray(errosGravesContrato) ? errosGravesContrato.join(' ') : String(errosGravesContrato || '');
+  var erroBriefingCanonico = geradorBalcaoErroCriticoBriefingCanonico_(
+    String(erroIn || '') + ' ' +
+    String(cj.erro_critico || cj.erroCritico || '') + ' ' +
+    errosGravesTexto
+  );
+  if (erroBriefingCanonico) {
+    cj.erro_critico = erroBriefingCanonico;
+    delete cj.erroCritico;
+  }
   if (geradorCampoTextoMortoF4_(cj.regra_de_ouro)) {
     cj.regra_de_ouro = 'Perguntar e confirmar a necessidade do cliente antes de sugerir produto no balcão.';
   }
   if (geradorCampoTextoMortoF4_(cj.metrica)) {
     cj.metrica = 'Auditar semanalmente 5 atendimentos e registrar se houve pergunta de esclarecimento antes da sugestão de produto.';
   }
+  cj.frequencia = geradorBalcaoFrequenciaEvento_();
+  cj.proibido = [
+    'Sugerir produto antes de entender a necessidade do cliente',
+    'Recomendar produto com base em suposição',
+    'Pular pergunta de esclarecimento antes da sugestão',
+    'Ignorar sinal de risco, receita, interação, dúvida técnica ou insegurança',
+    'Deixar de encaminhar ao farmacêutico quando a situação exceder o balcão',
+  ];
+  cj.procedimento = [
+    'Receber o cliente e identificar a dúvida inicial',
+    'Fazer pergunta curta para esclarecer a necessidade antes de sugerir produto',
+    'Confirmar em frase simples o que entendeu da necessidade',
+    'Verificar se há risco, receita, dúvida técnica, interação, restrição ou insegurança',
+    'Encaminhar ao farmacêutico quando o caso exceder o balcão',
+    'Só então apresentar produto, alternativa ou próximo passo adequado',
+    'Encerrar confirmando o próximo passo com clareza',
+  ];
   cj.checklist = [
     'Reconheceu rapidamente o cliente',
     'Ouviu a dúvida inicial sem interromper',
@@ -9828,6 +9890,104 @@ function fase4SelfTestGuardCriticoSemContexto_() {
     critico_legado_sem_contexto_bloqueado: bloqueou,
     critico_com_standards_preservado: caso4,
     pop_antigo_legado_nao_critico_preservado: caso5,
+  };
+}
+
+function fase4SelfTestFidelidadeBriefingBalcao_() {
+  var user = { nome: 'Teste', perfil: 'admin' };
+  var payload = {
+    tipo: 'critico',
+    titulo: 'Atendimento ao Cliente na Farmácia',
+    area: 'Atendimento e vendas',
+    processo: 'atendimento no balcão',
+    conteudoJson: {
+      objetivo:
+        'Garantir que a equipe entenda a necessidade do cliente antes de sugerir produto, com segurança e encaminhamento adequado no balcão.',
+      regra_de_ouro: 'Perguntar antes de sugerir.',
+      frequencia: 'Diário',
+      erro_critico: 'atendente sugere produto sem entender a necessidade',
+      proibido: ['Deixar cliente sem resposta', 'Falar sem olhar'],
+      procedimento: [
+        {
+          itemId: '1',
+          descricao: 'Atender cliente',
+          acao: 'Atender cliente',
+          criterioAvaliacao: 'Execução conforme descrição da etapa, observável no ponto de venda.',
+          tipoAvaliacao: 'binario',
+          peso: 1,
+          obrigatorio: true,
+          critico: false,
+        },
+      ],
+      itensAvaliaveis: [
+        {
+          itemId: '1',
+          descricao: 'Atender cliente',
+          acao: 'Atender cliente',
+          criterioAvaliacao: 'Execução conforme descrição da etapa, observável no ponto de venda.',
+          tipoAvaliacao: 'binario',
+          peso: 1,
+          obrigatorio: true,
+          critico: false,
+        },
+      ],
+      materiais_epi: [],
+      errosComuns: [],
+      pontosDeAtencao: [],
+      pontos_criticos: [],
+      como_fazer_bem: 'Perguntar antes de sugerir produto.',
+    },
+  };
+  var norm = normalizePopJsonPayload_(user, JSON.parse(JSON.stringify(payload)));
+  popGarantirQualidadeFase4AntesPersistir_(norm, user, 'selftest_fidelidade_briefing_balcao');
+  var c = norm.conteudoJson || {};
+  var texto = JSON.stringify(c);
+  var itens = c.itens_avaliaveis || [];
+  var stdFarm = null;
+  for (var i = 0; i < itens.length; i++) {
+    if (String(itens[i].itemId || '') === 'STD-BALCAO-ENCAMINHAMENTO-FARMACEUTICO') stdFarm = itens[i];
+  }
+  var erroOk =
+    String(c.erro_critico || '') ===
+    'Sugerir produto sem entender a necessidade do cliente antes de fazer perguntas de esclarecimento.';
+  var proibidoOk =
+    Array.isArray(c.proibido) &&
+    c.proibido.indexOf('Sugerir produto antes de entender a necessidade do cliente') >= 0 &&
+    c.proibido.indexOf('Recomendar produto com base em suposição') >= 0 &&
+    c.proibido.indexOf('Pular pergunta de esclarecimento antes da sugestão') >= 0 &&
+    c.proibido.indexOf('Ignorar sinal de risco, receita, interação, dúvida técnica ou insegurança') >= 0 &&
+    c.proibido.indexOf('Deixar de encaminhar ao farmacêutico quando a situação exceder o balcão') >= 0 &&
+    texto.indexOf('Deixar cliente sem resposta') < 0;
+  var etapasEsperadas = [
+    'Receber o cliente e identificar a dúvida inicial',
+    'Fazer pergunta curta para esclarecer a necessidade antes de sugerir produto',
+    'Confirmar em frase simples o que entendeu da necessidade',
+    'Verificar se há risco, receita, dúvida técnica, interação, restrição ou insegurança',
+    'Encaminhar ao farmacêutico quando o caso exceder o balcão',
+    'Só então apresentar produto, alternativa ou próximo passo adequado',
+    'Encerrar confirmando o próximo passo com clareza',
+  ];
+  var etapasOk =
+    Array.isArray(c.procedimento) &&
+    etapasEsperadas.every(function (x) { return c.procedimento.indexOf(x) >= 0; });
+  var freqOk = String(c.frequencia || '') === geradorBalcaoFrequenciaEvento_();
+  var aplicOk =
+    !!stdFarm &&
+    String(stdFarm.aplicabilidade || '') ===
+      'quando_houver_atendimento_no_balcao_com_risco_receita_duvida_tecnica_ou_inseguranca';
+  var standardsOk = popTemStandardsAuditaveisFortes_(itens);
+  var semLegado = texto.indexOf('Execução conforme descrição da etapa') < 0;
+  var viewerNaoProcedural = standardsOk && etapasOk && semLegado;
+  return {
+    ok: erroOk && proibidoOk && etapasOk && freqOk && aplicOk && standardsOk && semLegado && viewerNaoProcedural,
+    erro_critico_preserva_briefing: erroOk,
+    proibido_alinhado: proibidoOk,
+    etapas_apoio_corrigidas: etapasOk,
+    frequencia_orientada_a_evento: freqOk,
+    aplicabilidade_farmaceutico_corrigida: aplicOk,
+    viewer_critico_nao_prioriza_procedural: viewerNaoProcedural,
+    standards_preservados: standardsOk,
+    sem_criterio_legado_generico: semLegado,
   };
 }
 

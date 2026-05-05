@@ -5339,7 +5339,7 @@
     function renderProcedimentoApoioHtml_(items) {
       if (!viewerTemConteudoUtil_(items)) return '';
       return (
-        '<details class="doc-block" open><summary><strong>Etapas principais</strong> <span class="muted">apoio operacional</span></summary>' +
+        '<details class="doc-block"><summary><strong>Etapas principais</strong> <span class="muted">apoio operacional</span></summary>' +
         '<div style="margin-top:12px;">' + arrayToHtml(items) + '</div></details>'
       );
     }
@@ -5811,27 +5811,32 @@
       html += '</div>';
       html += '</div>';
 
-      html += renderRascunhoAlertHtml_(pop);
-      html += '<div class="doc-alert"><strong>Documento controlado.</strong> Utilize sempre a versão vigente no portal.<br><br><strong>Leitura:</strong> ' +
-        (pop.lido ? 'Lido em: ' + escapeHtml(formatDateTime(pop.dataLeitura)) : 'Pendente') +
-        '</div>';
-      html += renderPopJourneyFullHtml_(pop);
-
-      const recursosHtml = renderRecursosRelacionadosHtml_(pop);
-      html += '<div class="doc-grid">';
-      html += renderMetadadosDocumentoHtml_(pop);
-      if (recursosHtml) html += recursosHtml;
-      html += '</div>';
-
       const standardsViewer = standardsAuditaveisDoConteudo_(c);
+      const isCriticoViewer = String(pop.tipo || '').toLowerCase() === 'critico';
       const fase4SemStandards =
-        String(pop.tipo || '').toLowerCase() === 'critico' &&
+        isCriticoViewer &&
         standardsViewer.length === 0 &&
         !!(c.status_crivo || c.fase4_score_conceito || c.governanca_modo);
       const critViewer =
         standardsViewer.length > 0 ||
-        (String(pop.tipo || '').toLowerCase() === 'critico' && isCriticoProcedimentoItemsUi_(c.procedimento));
+        (isCriticoViewer && isCriticoProcedimentoItemsUi_(c.procedimento));
       const checklistViewer = Array.isArray(c.checklist) && c.checklist.length ? c.checklist : checklist;
+      const documentoControladoHtml = '<div class="doc-alert"><strong>Documento controlado.</strong> Utilize sempre a versão vigente no portal.<br><br><strong>Leitura:</strong> ' +
+        (pop.lido ? 'Lido em: ' + escapeHtml(formatDateTime(pop.dataLeitura)) : 'Pendente') +
+        '</div>';
+      const recursosHtml = renderRecursosRelacionadosHtml_(pop);
+      const metadadosHtml =
+        '<div class="doc-grid">' +
+        renderMetadadosDocumentoHtml_(pop) +
+        (recursosHtml ? recursosHtml : '') +
+        '</div>';
+
+      html += renderRascunhoAlertHtml_(pop);
+      if (!isCriticoViewer) {
+        html += documentoControladoHtml;
+        html += renderPopJourneyFullHtml_(pop);
+        html += metadadosHtml;
+      }
 
       html += renderTextBlockIfUseful_('Diretriz executiva', c.diretriz_executiva);
       html += renderTextBlockIfUseful_('Regra de ouro', c.regra_de_ouro, 'highlight-block');
@@ -5846,6 +5851,11 @@
         html += renderTextBlockIfUseful_('Frequência', c.frequencia);
       }
       html += renderListBlockIfUseful_('Checklist operacional', checklistViewer);
+      if (isCriticoViewer) {
+        html += documentoControladoHtml;
+        html += renderPopJourneyFullHtml_(pop);
+        html += metadadosHtml;
+      }
       html += renderComoFazerBemHtml_(c.como_fazer_bem || c.comoFazerBem);
       html += renderProcedimentoApoioHtml_(c.procedimento);
       html += renderTextBlockIfUseful_('Frequência', humanizeFrequenciaCritico_(c.frequencia));
