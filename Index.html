@@ -4603,7 +4603,33 @@
       out.errosComuns = data.errosComuns !== undefined ? data.errosComuns : out.errosComuns;
       out.pontosDeAtencao = data.pontosDeAtencao !== undefined ? data.pontosDeAtencao : out.pontosDeAtencao;
       out.como_fazer_bem = data.como_fazer_bem !== undefined ? data.como_fazer_bem : out.como_fazer_bem;
+      if (data.frequencia_texto_operacional !== undefined && String(data.frequencia_texto_operacional || '').trim()) {
+        out.frequencia_texto_operacional = String(data.frequencia_texto_operacional || '').trim();
+      }
       return out;
+    }
+
+    function inferirValorSelectFrequenciaCritica_(conteudo) {
+      const c = conteudo || {};
+      let slug = String(c.frequencia || '').trim();
+      if (slug === 'diario' || slug === 'semanal' || slug === 'por_demanda') return slug;
+      const texto = String(c.frequencia_texto_operacional || '').trim();
+      const raw = texto || slug;
+      if (!raw) return '';
+      const low = raw
+        .toLowerCase()
+        .normalize('NFD')
+        .replace(/[\u0300-\u036f]/g, '');
+      if (low.includes('diario')) return 'diario';
+      if (low.includes('semanal')) return 'semanal';
+      if (low.includes('por demanda') || /\bdemanda\b/.test(low)) return 'por_demanda';
+      if (
+        raw.length > 48 ||
+        /sempre que|quando houver|a cada atendimento|necessidade de orienta|insegu|antes da compra/i.test(raw)
+      ) {
+        return 'por_demanda';
+      }
+      return '';
     }
 
     function preencherFormularioComJson(data) {
@@ -4684,7 +4710,8 @@
       set('pop_procedimento', flattenListaCampo_(conteudo.procedimento || []));
       if (__popTipoUiSnapshot === 'critico') {
         const fqc = document.getElementById('pop_frequencia_critica');
-        if (fqc) fqc.value = String(conteudo.frequencia || '').trim();
+        const selFq = inferirValorSelectFrequenciaCritica_(conteudo);
+        if (fqc) fqc.value = selFq;
         if (isCriticoProcedimentoItemsUi_(conteudo.procedimento)) {
           renderCriticoItemsEditor_(conteudo.procedimento);
         } else {
@@ -4894,7 +4921,16 @@
         responsaveis: listaDoCampoPreservandoOriginal_('pop_responsaveis', originalConteudo.responsaveis),
         materiais_epi: valorTextoPreservandoBomOriginal_('pop_materiais_epi', originalConteudo.materiais_epi),
         regra_de_ouro: valueOf('pop_regra_de_ouro'),
-        frequencia: popIsCriticoUi_() ? valueOf('pop_frequencia_critica') : valueOf('pop_frequencia'),
+        frequencia: (function () {
+          if (!popIsCriticoUi_()) return valueOf('pop_frequencia');
+          let sel = valueOf('pop_frequencia_critica');
+          const o = window.popConteudoJsonOriginalGerado || {};
+          if (!sel) sel = inferirValorSelectFrequenciaCritica_(o);
+          return sel || '';
+        })(),
+        frequencia_texto_operacional: popIsCriticoUi_()
+          ? String(((window.popConteudoJsonOriginalGerado || {}).frequencia_texto_operacional) || '').trim()
+          : '',
         procedimento: popIsCriticoUi_() && temStandardsAuditaveis_(originalConteudo.itens_avaliaveis || originalConteudo.itensAvaliaveis)
           ? (originalConteudo.procedimento || [])
           : (popIsCriticoUi_() ? readCriticoItemsFromDom_() : splitTextArea('pop_procedimento')),
@@ -5344,7 +5380,9 @@
       );
     }
 
-    function humanizeFrequenciaCritico_(v) {
+    function humanizeFrequenciaCritico_(v, textoOperacional) {
+      const op = String(textoOperacional || '').trim();
+      if (op) return op;
       const s = String(v || '').trim();
       if (s === 'diario') return 'Diário';
       if (s === 'semanal') return 'Semanal';
@@ -5858,7 +5896,7 @@
       }
       html += renderComoFazerBemHtml_(c.como_fazer_bem || c.comoFazerBem);
       html += renderProcedimentoApoioHtml_(c.procedimento);
-      html += renderTextBlockIfUseful_('Frequência', humanizeFrequenciaCritico_(c.frequencia));
+      html += renderTextBlockIfUseful_('Frequência', humanizeFrequenciaCritico_(c.frequencia, c.frequencia_texto_operacional));
       html += renderTextBlockIfUseful_('Objetivo', c.objetivo);
       html += renderTextBlockIfUseful_('Escopo', c.escopo);
 

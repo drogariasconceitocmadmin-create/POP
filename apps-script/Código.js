@@ -1804,14 +1804,55 @@ function isCriticoProcedimentoItems_(arr) {
 }
 
 function normalizeFrequenciaCritico_(raw) {
-  var s = normalizeText_(raw)
-    .toLowerCase()
-    .replace(/-/g, '_')
-    .replace(/\s+/g, '_');
+  var t = normalizeText_(raw || '');
+  if (!t) return '';
+  var s = t.toLowerCase().replace(/-/g, '_').replace(/\s+/g, '_');
   if (s === 'por_demanda' || s === 'pordemanda') return 'por_demanda';
   if (s === 'diario' || s === 'diário') return 'diario';
   if (s === 'semanal') return 'semanal';
+
+  var bag = iaBagNorm_(t);
+  if (!bag) return '';
+  if (bag.indexOf('pordemanda') >= 0 || bag.indexOf('por_demanda') >= 0) return 'por_demanda';
+  if (bag === 'demanda') return 'por_demanda';
+  if (bag.indexOf('diario') >= 0) return 'diario';
+  if (bag.indexOf('semanal') >= 0) return 'semanal';
+
+  var eventoPorDemanda =
+    bag.indexOf('semprequehouve') >= 0 ||
+    bag.indexOf('quandohouver') >= 0 ||
+    bag.indexOf('acadaatendimento') >= 0 ||
+    bag.indexOf('acadaocor') >= 0 ||
+    bag.indexOf('acada_ocor') >= 0 ||
+    (bag.indexOf('acada') >= 0 && bag.indexOf('ocor') >= 0) ||
+    (bag.indexOf('neces') >= 0 && bag.indexOf('orient') >= 0 && bag.indexOf('balc') >= 0 && bag.indexOf('duvid') >= 0) ||
+    (bag.indexOf('insegur') >= 0 && bag.indexOf('balc') >= 0);
+  if (eventoPorDemanda) return 'por_demanda';
+
   return '';
+}
+
+/**
+ * Harmoniza slug canónico diario|semanal|por_demanda com texto operacional (viewer) para POP crítico.
+ * @param {Object} cj conteudoJson mutável
+ */
+function popSincronizarFrequenciaCriticoConteudoJson_(cj) {
+  if (!cj || typeof cj !== 'object') return;
+  var textoOpIni = normalizeText_(cj.frequencia_texto_operacional || '');
+  var freqIni = normalizeText_(cj.frequencia || '');
+  var fq = normalizeFrequenciaCritico_(freqIni || textoOpIni);
+  if (!fq) return;
+  var slugs = { por_demanda: true, diario: true, semanal: true };
+  cj.frequencia = fq;
+  if (fq !== 'por_demanda') {
+    delete cj.frequencia_texto_operacional;
+    return;
+  }
+  var texto = textoOpIni;
+  if (!texto && freqIni && !slugs[freqIni]) texto = freqIni;
+  if (texto && slugs[texto]) texto = '';
+  if (texto) cj.frequencia_texto_operacional = texto;
+  else delete cj.frequencia_texto_operacional;
 }
 
 function sanitizeOneItemCritico_(o) {
@@ -1867,9 +1908,9 @@ function mergeCriticoProcedimentoImutavelItemId_(prevList, nextList) {
 function validatePopCritico_(normalized) {
   if (normalizeTipoPop_(normalized.tipo) !== 'critico') return;
   var cj = normalized.conteudoJson || {};
-  var fq = normalizeFrequenciaCritico_(cj.frequencia || '');
-  if (!fq) throw new Error('POP crítico: selecione a frequência (diário, semanal ou por demanda).');
-  normalized.conteudoJson.frequencia = fq;
+  var fqProbe = normalizeFrequenciaCritico_(normalizeText_(cj.frequencia || '') || normalizeText_(cj.frequencia_texto_operacional || ''));
+  if (!fqProbe) throw new Error('POP crítico: selecione a frequência (diário, semanal ou por demanda).');
+  popSincronizarFrequenciaCriticoConteudoJson_(cj);
   var proc = normalized.conteudoJson.procedimento;
   if (!Array.isArray(proc) || proc.length < 1) {
     throw new Error('POP crítico: inclua pelo menos um item avaliável em procedimento.');
@@ -5905,13 +5946,21 @@ function geradorEnriquecerCamposViewerBalcao_(cj) {
       'Aplica-se a atendimentos presenciais no balcão em que o cliente apresenta dúvida, necessidade de orientação, busca por produto ou insegurança antes da compra.';
   }
   var fqBag = iaBagNorm_(cj.frequencia || '');
+  var fqCan0 = normalizeFrequenciaCritico_(normalizeText_(cj.frequencia || '') || normalizeText_(cj.frequencia_texto_operacional || ''));
+  var textoFreq0 = normalizeText_(cj.frequencia_texto_operacional || '');
   if (
     geradorCampoTextoMortoF4_(cj.frequencia) ||
     fqBag === 'diario' ||
     fqBag === 'por demanda' ||
     fqBag === 'a cada ocorrencia'
   ) {
-    cj.frequencia = geradorBalcaoFrequenciaEvento_();
+    cj.frequencia = 'por_demanda';
+    if (geradorCampoTextoMortoF4_(cj.frequencia_texto_operacional)) {
+      cj.frequencia_texto_operacional = geradorBalcaoFrequenciaEvento_();
+    }
+  } else if (fqCan0 === 'por_demanda' && !textoFreq0 && normalizeText_(cj.frequencia || '').length > 20) {
+    cj.frequencia_texto_operacional = normalizeText_(cj.frequencia || '');
+    cj.frequencia = 'por_demanda';
   }
   if (!Array.isArray(cj.responsaveis) || cj.responsaveis.length < 2) {
     cj.responsaveis = ['Atendente de balcão', 'Farmacêutico de plantão', 'Líder ou gerente da loja'];
@@ -5961,7 +6010,8 @@ function geradorForcarBlocosOperacionaisBalcao_(cj, contract, situacaoIn, erroIn
   if (geradorCampoTextoMortoF4_(cj.metrica)) {
     cj.metrica = 'Auditar semanalmente 5 atendimentos e registrar se houve pergunta de esclarecimento antes da sugestão de produto.';
   }
-  cj.frequencia = geradorBalcaoFrequenciaEvento_();
+  cj.frequencia = 'por_demanda';
+  cj.frequencia_texto_operacional = geradorBalcaoFrequenciaEvento_();
   cj.proibido = [
     'Sugerir produto antes de entender a necessidade do cliente',
     'Recomendar produto com base em suposição',
@@ -7638,12 +7688,12 @@ function validatePopCriticoListaErros_(normalized) {
   var out = [];
   if (normalizeTipoPop_(normalized.tipo) !== 'critico') return out;
   var cj = normalized.conteudoJson || {};
-  var fq = normalizeFrequenciaCritico_(cj.frequencia || '');
-  if (!fq) {
+  var fqProbe = normalizeFrequenciaCritico_(normalizeText_(cj.frequencia || '') || normalizeText_(cj.frequencia_texto_operacional || ''));
+  if (!fqProbe) {
     out.push('frequência inválida ou ausente (use diário, semanal ou por demanda)');
     return out;
   }
-  normalized.conteudoJson.frequencia = fq;
+  popSincronizarFrequenciaCriticoConteudoJson_(cj);
   var proc = normalized.conteudoJson.procedimento;
   if (!Array.isArray(proc) || proc.length < POP_PUBLISH_MIN_PROC_CRITICO_) {
     out.push('procedimento insuficiente (mínimo ' + POP_PUBLISH_MIN_PROC_CRITICO_ + ' itens avaliáveis)');
@@ -7738,9 +7788,10 @@ function popAplicarNormalizaveisPublicacao_(pop) {
   }
 
   if (normalizeTipoPop_(pop.tipo) === 'critico') {
-    var fq = normalizeFrequenciaCritico_(cj.frequencia || '');
-    if (fq && fq !== cj.frequencia) {
-      cj.frequencia = fq;
+    var rawFf = normalizeText_(cj.frequencia || '');
+    var fq = normalizeFrequenciaCritico_(rawFf || normalizeText_(cj.frequencia_texto_operacional || ''));
+    if (fq) {
+      popSincronizarFrequenciaCriticoConteudoJson_(cj);
       mudou = true;
     }
   }
@@ -8319,7 +8370,7 @@ function popBehavioralSnapshot_(pop) {
   var frame = { snapBehavior: 1, tipo: tipo };
 
   if (tipo === 'critico') {
-    frame.frequencia = normalizeFrequenciaCritico_(cj.frequencia || '');
+    frame.frequencia = normalizeFrequenciaCritico_(normalizeText_(cj.frequencia || '') || normalizeText_(cj.frequencia_texto_operacional || ''));
     frame.procedimento = popBehavioralCritProcedimento_(cj.procedimento || []);
     return frame;
   }
@@ -9204,8 +9255,18 @@ function normalizePopJsonPayload_(user, incoming) {
       ? normalizeProcedimentoCriticoLista_(procedimentoRaw || [])
       : normalizeStringArray_(procedimentoRaw || []);
   var freqRaw = obj.frequencia !== undefined ? obj.frequencia : contentCandidate.frequencia;
+  var freqTxtMeta = obj.frequencia_texto_operacional !== undefined ? obj.frequencia_texto_operacional : contentCandidate.frequencia_texto_operacional;
+  var rawFreqStr = normalizeText_(freqRaw != null ? String(freqRaw) : '');
+  var textoFreqIn = normalizeText_(freqTxtMeta != null ? String(freqTxtMeta) : '');
   var frequenciaOut =
-    tipoPop === 'critico' ? normalizeFrequenciaCritico_(freqRaw || '') : normalizeText_(freqRaw || '');
+    tipoPop === 'critico' ? normalizeFrequenciaCritico_(rawFreqStr || textoFreqIn) : normalizeText_(rawFreqStr);
+  var textoFreqOut = '';
+  if (tipoPop === 'critico' && frequenciaOut === 'por_demanda') {
+    textoFreqOut = textoFreqIn;
+    if (!textoFreqOut && rawFreqStr && rawFreqStr !== 'por_demanda' && rawFreqStr !== 'diario' && rawFreqStr !== 'semanal') {
+      if (normalizeFrequenciaCritico_(rawFreqStr) === 'por_demanda') textoFreqOut = rawFreqStr;
+    }
+  }
 
   // O HTML atual manda um objeto gigante "flat"; preservar chaves extras de Fase 4 e sobrescrever campos editáveis.
   var conteudoJson = Object.assign({}, contentCandidate);
@@ -9258,6 +9319,11 @@ function normalizePopJsonPayload_(user, incoming) {
     aprovadorEsperado: normalizeText_(obj.aprovador || contentCandidate.aprovador || contentCandidate.aprovadorEsperado || '') || gov.aprovadorEsperado,
     tipoFluxo: tipoPop,
   });
+
+  if (tipoPop === 'critico') {
+    if (textoFreqOut) conteudoJson.frequencia_texto_operacional = textoFreqOut;
+    popSincronizarFrequenciaCriticoConteudoJson_(conteudoJson);
+  }
 
   return {
     popId: normalizeText_(obj.popId || obj.id || contentCandidate.popId || ''),
@@ -9970,7 +10036,9 @@ function fase4SelfTestFidelidadeBriefingBalcao_() {
   var etapasOk =
     Array.isArray(c.procedimento) &&
     etapasEsperadas.every(function (x) { return c.procedimento.indexOf(x) >= 0; });
-  var freqOk = String(c.frequencia || '') === geradorBalcaoFrequenciaEvento_();
+  var freqCanonOk = String(c.frequencia || '') === 'por_demanda';
+  var freqTextOk = String(c.frequencia_texto_operacional || '') === geradorBalcaoFrequenciaEvento_();
+  var freqOk = freqCanonOk && freqTextOk;
   var aplicOk =
     !!stdFarm &&
     String(stdFarm.aplicabilidade || '') ===
@@ -9988,6 +10056,109 @@ function fase4SelfTestFidelidadeBriefingBalcao_() {
     viewer_critico_nao_prioriza_procedural: viewerNaoProcedural,
     standards_preservados: standardsOk,
     sem_criterio_legado_generico: semLegado,
+  };
+}
+
+function fase4SelfTestFrequenciaCriticoBalcao_() {
+  var user = { nome: 'Teste', perfil: 'admin' };
+  var fraseEvt = geradorBalcaoFrequenciaEvento_();
+  function procMin() {
+    return [
+      {
+        itemId: 'T-1',
+        etapa: 'Etapa 1',
+        descricao: 'Registrar pergunta de esclarecimento antes da sugestão.',
+        acao: 'Registrar pergunta de esclarecimento antes da sugestão.',
+        criterioAvaliacao: 'Há registo audível ou escrito de pergunta de esclarecimento antes da sugestão de produto.',
+        tipoAvaliacao: 'binario',
+        peso: '100',
+        obrigatorio: true,
+        critico: true,
+      },
+    ];
+  }
+  function runNorm(incoming) {
+    return normalizePopJsonPayload_(user, JSON.parse(JSON.stringify(incoming)));
+  }
+  function tryValidate(norm) {
+    try {
+      validatePopCritico_(norm);
+      return { ok: true, err: '' };
+    } catch (e) {
+      return { ok: false, err: String((e && e.message) || e) };
+    }
+  }
+
+  var n1 = runNorm({
+    tipo: 'critico',
+    titulo: 'POP teste',
+    area: 'Atendimento e vendas',
+    processo: 'atendimento no balcão',
+    frequencia: fraseEvt,
+    procedimento: procMin(),
+    autorNome: 'Teste',
+    aprovador: 'Gerente',
+  });
+  var v1 = tryValidate(n1);
+  var c1 = n1.conteudoJson || {};
+  var caso1 =
+    v1.ok &&
+    String(c1.frequencia || '') === 'por_demanda' &&
+    String(c1.frequencia_texto_operacional || '') === fraseEvt;
+
+  var n2 = runNorm({
+    tipo: 'critico',
+    titulo: 'POP teste',
+    area: 'Atendimento e vendas',
+    processo: 'atendimento',
+    frequencia: 'Diário',
+    procedimento: procMin(),
+    autorNome: 'Teste',
+    aprovador: 'Gerente',
+  });
+  validatePopCritico_(n2);
+  var c2 = n2.conteudoJson || {};
+  var caso2 = String(c2.frequencia || '') === 'diario';
+
+  var n3 = runNorm({
+    tipo: 'critico',
+    titulo: 'POP teste',
+    area: 'Operação',
+    processo: 'processo x',
+    frequencia: '',
+    procedimento: procMin(),
+    autorNome: 'Teste',
+    aprovador: 'Gerente',
+  });
+  var v3 = tryValidate(n3);
+
+  var n4 = runNorm({
+    tipo: 'critico',
+    titulo: 'POP teste',
+    area: 'Atendimento e vendas',
+    processo: 'atendimento no balcão',
+    frequencia: 'por_demanda',
+    frequencia_texto_operacional: fraseEvt,
+    procedimento: procMin(),
+    autorNome: 'Teste',
+    aprovador: 'Gerente',
+  });
+  validatePopCritico_(n4);
+  var c4 = n4.conteudoJson || {};
+
+  return {
+    ok:
+      caso1 &&
+      caso2 &&
+      !v3.ok &&
+      String((v3.err || '').toLowerCase()).indexOf('frequência') >= 0 &&
+      String(c4.frequencia || '') === 'por_demanda' &&
+      String(c4.frequencia_texto_operacional || '') === fraseEvt,
+    evento_para_por_demanda: caso1,
+    diario_aceito: caso2,
+    vazio_bloqueia: !v3.ok,
+    payload_ia_com_texto:
+      String(c4.frequencia || '') === 'por_demanda' && String(c4.frequencia_texto_operacional || '') === fraseEvt,
   };
 }
 
