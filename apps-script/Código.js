@@ -1883,6 +1883,56 @@ function normalizeProcedimentoCriticoLista_(raw) {
   return out;
 }
 
+/**
+ * POP crítico Fase 4: com standards auditáveis fortes, procedimento/etapas são apoio operacional.
+ * Normaliza para lista de strings (não promove a itens avaliáveis; não injeta critérios genéricos).
+ */
+function popNormalizarProcedimentoApoioCritico_(sources) {
+  sources = sources || {};
+  var seen = {};
+  var out = [];
+  function pushLine(s) {
+    var t = normalizeText_(s);
+    if (!t) return;
+    var k = iaBagNorm_(t);
+    if (seen[k]) return;
+    seen[k] = true;
+    out.push(t);
+  }
+  function consumeArray(a) {
+    if (!Array.isArray(a)) return;
+    for (var i = 0; i < a.length; i++) {
+      var x = a[i];
+      if (x == null) continue;
+      if (typeof x === 'string' || typeof x === 'number' || typeof x === 'boolean') {
+        pushLine(String(x));
+      } else if (typeof x === 'object') {
+        var line = normalizeText_(
+          x.texto ||
+            x.text ||
+            x.label ||
+            x.descricao_passo ||
+            x.descricao ||
+            x.acao ||
+            x.etapa ||
+            ''
+        );
+        pushLine(line);
+      }
+    }
+  }
+  var pr = sources.procedimentoRaw;
+  if (typeof pr === 'string') {
+    var lines = String(pr).split(/\r?\n/);
+    for (var j = 0; j < lines.length; j++) pushLine(lines[j]);
+  } else if (Array.isArray(pr)) {
+    consumeArray(pr);
+  }
+  consumeArray(sources.procedimento_apoio);
+  consumeArray(sources.etapas_principais);
+  return out;
+}
+
 function mergeCriticoProcedimentoImutavelItemId_(prevList, nextList) {
   var prev = Array.isArray(prevList) ? prevList : [];
   var nxt = Array.isArray(nextList) ? nextList : [];
@@ -1911,28 +1961,15 @@ function validatePopCritico_(normalized) {
   var fqProbe = normalizeFrequenciaCritico_(normalizeText_(cj.frequencia || '') || normalizeText_(cj.frequencia_texto_operacional || ''));
   if (!fqProbe) throw new Error('POP crítico: selecione a frequência (diário, semanal ou por demanda).');
   popSincronizarFrequenciaCriticoConteudoJson_(cj);
-  var proc = normalized.conteudoJson.procedimento;
-  if (!Array.isArray(proc) || proc.length < 1) {
-    throw new Error('POP crítico: inclua pelo menos um item avaliável em procedimento.');
+  var itensNorm = popItensAvaliaveisNormalizados_(cj.itens_avaliaveis || cj.itensAvaliaveis || []);
+  if (!popTemStandardsAuditaveisFortes_(itensNorm)) {
+    throw new Error('POP crítico: standards auditáveis fortes são obrigatórios.');
   }
-  var seen = {};
-  for (var i = 0; i < proc.length; i++) {
-    var it = proc[i];
-    if (!it || typeof it !== 'object') throw new Error('POP crítico: procedimento deve ser uma lista de itens estruturados.');
-    var id = String(it.itemId || '').trim();
-    if (!id) throw new Error('POP crítico: cada item deve ter itemId.');
-    if (seen[id]) throw new Error('POP crítico: itemId duplicado: ' + id + '.');
-    seen[id] = true;
-    if (!String(it.etapa || '').trim()) throw new Error('POP crítico: etapa obrigatória no item ' + id + '.');
-    if (!String(it.acao || '').trim()) throw new Error('POP crítico: ação obrigatória no item ' + id + '.');
-    if (!String(it.criterioAvaliacao || '').trim()) throw new Error('POP crítico: critério de avaliação obrigatório no item ' + id + '.');
-    if (String(it.tipoAvaliacao || 'binario') !== 'binario') throw new Error('POP crítico: tipoAvaliacao deve ser binario.');
-    var pe = String(it.peso != null ? it.peso : '').trim();
-    if (!pe) throw new Error('POP crítico: peso obrigatório no item ' + id + '.');
-    if (isNaN(parseFloat(pe))) throw new Error('POP crítico: peso numérico inválido no item ' + id + '.');
-    if (it.obrigatorio === undefined) throw new Error('POP crítico: campo obrigatorio obrigatório no item ' + id + '.');
-    if (it.critico === undefined) throw new Error('POP crítico: campo critico obrigatório no item ' + id + '.');
-  }
+  cj.procedimento = popNormalizarProcedimentoApoioCritico_({
+    procedimentoRaw: cj.procedimento,
+    procedimento_apoio: cj.procedimento_apoio,
+    etapas_principais: cj.etapas_principais,
+  });
 }
 
 function assertAutorDiferenteDeAprovadorCritico_(normalized) {
@@ -4153,7 +4190,6 @@ function assertPopCamposMinimosFluxo_(pop) {
 
 var POP_PUBLISH_MIN_CHECKLIST_ = 5;
 var POP_PUBLISH_MIN_PROC_COLAB_ = 3;
-var POP_PUBLISH_MIN_PROC_CRITICO_ = 3;
 var POP_PUBLISH_MIN_OBJETIVO_LEN_ = 35;
 var POP_PUBLISH_MIN_METRICA_LEN_ = 12;
 
@@ -7694,42 +7730,16 @@ function validatePopCriticoListaErros_(normalized) {
     return out;
   }
   popSincronizarFrequenciaCriticoConteudoJson_(cj);
-  var proc = normalized.conteudoJson.procedimento;
-  if (!Array.isArray(proc) || proc.length < POP_PUBLISH_MIN_PROC_CRITICO_) {
-    out.push('procedimento insuficiente (mínimo ' + POP_PUBLISH_MIN_PROC_CRITICO_ + ' itens avaliáveis)');
+  var itensNorm = popItensAvaliaveisNormalizados_(cj.itens_avaliaveis || cj.itensAvaliaveis || []);
+  if (!popTemStandardsAuditaveisFortes_(itensNorm)) {
+    out.push('POP crítico: standards auditáveis fortes são obrigatórios.');
     return out;
   }
-  var seen = {};
-  for (var i = 0; i < proc.length; i++) {
-    var it = proc[i];
-    if (!it || typeof it !== 'object') {
-      out.push('procedimento: item ' + (i + 1) + ' inválido (objeto esperado)');
-      continue;
-    }
-    var id = String(it.itemId || '').trim();
-    if (!id) out.push('procedimento: item sem itemId');
-    else if (seen[id]) out.push('itemId duplicado no procedimento: ' + id);
-    else seen[id] = true;
-    if (!String(it.etapa || '').trim()) out.push('POP crítico: etapa obrigatória no item ' + (id || String(i + 1)));
-    if (!String(it.acao || '').trim()) out.push('POP crítico: ação obrigatória no item ' + (id || String(i + 1)));
-    var crit = String(it.criterioAvaliacao || '').trim();
-    if (!crit) out.push('POP crítico: critério de avaliação obrigatório no item ' + (id || String(i + 1)));
-    else {
-      if (crit.length < 14) out.push('criterio_avaliacao vago ou curto no item ' + (id || String(i + 1)));
-      if (iaMotorContemFraseBanidaLeve_(crit)) out.push('criterio_avaliacao abstrato no item ' + (id || String(i + 1)));
-      var critOk =
-        /\b(%|\b\d+\b|zero|nenhum|checklist|binario|sim\/nao|sim\/não|confirmar|contar|registrar|medir|prazo|minutos|minuto|horas|hora|dias|dia|semana|semanal|diario|diário)\b/.test(iaBagNorm_(crit));
-      if (!critOk) out.push('criterio_avaliacao não auditável (sem indício mensurável) no item ' + (id || String(i + 1)));
-    }
-    if (String(it.tipoAvaliacao || 'binario') !== 'binario') out.push('POP crítico: tipoAvaliacao deve ser binario no item ' + (id || String(i + 1)));
-    var pe = String(it.peso != null ? it.peso : '').trim();
-    if (!pe) out.push('POP crítico: peso obrigatório no item ' + (id || String(i + 1)));
-    else if (isNaN(parseFloat(pe))) out.push('POP crítico: peso numérico inválido no item ' + (id || String(i + 1)));
-    if (it.obrigatorio === undefined) out.push('POP crítico: campo obrigatorio obrigatório no item ' + (id || String(i + 1)));
-    if (it.critico === undefined) out.push('POP crítico: campo critico obrigatório no item ' + (id || String(i + 1)));
-    var acTxt = String(it.acao || it.descricao || '').trim();
-    if (acTxt && !iaMotorTemVerboAcao_(acTxt)) out.push('acao sem verbo observável no item ' + (id || String(i + 1)));
-  }
+  cj.procedimento = popNormalizarProcedimentoApoioCritico_({
+    procedimentoRaw: cj.procedimento,
+    procedimento_apoio: cj.procedimento_apoio,
+    etapas_principais: cj.etapas_principais,
+  });
   return out;
 }
 
@@ -8669,10 +8679,13 @@ function updatePopDraft_(user, popId, versaoId, incoming) {
 
   if (normalizeTipoPop_(normalized.tipo) === 'critico') {
     var prevCj0 = match.obj.conteudoObj || {};
-    normalized.conteudoJson.procedimento = mergeCriticoProcedimentoImutavelItemId_(
-      prevCj0.procedimento,
-      normalized.conteudoJson.procedimento
-    );
+    var itensFusion = normalized.conteudoJson.itens_avaliaveis || normalized.conteudoJson.itensAvaliaveis || [];
+    if (!popTemStandardsAuditaveisFortes_(itensFusion)) {
+      normalized.conteudoJson.procedimento = mergeCriticoProcedimentoImutavelItemId_(
+        prevCj0.procedimento,
+        normalized.conteudoJson.procedimento
+      );
+    }
   }
   validatePopCritico_(normalized);
   assertAutorDiferenteDeAprovadorCritico_(normalized);
@@ -9249,11 +9262,28 @@ function normalizePopJsonPayload_(user, incoming) {
   var pontosCriticosArr = normalizeStringArray_(obj.pontos_criticos || contentCandidate.pontos_criticos || []);
   if (!pontosCriticosArr.length && pontosDeAtencaoArr.length) pontosCriticosArr = pontosDeAtencaoArr.slice();
 
+  var rawItensAval =
+    obj.itens_avaliaveis !== undefined
+      ? obj.itens_avaliaveis
+      : obj.itensAvaliaveis !== undefined
+        ? obj.itensAvaliaveis
+        : contentCandidate.itens_avaliaveis !== undefined
+          ? contentCandidate.itens_avaliaveis
+          : contentCandidate.itensAvaliaveis;
+  var itensCandPrev = popItensAvaliaveisNormalizados_(Array.isArray(rawItensAval) ? rawItensAval : []);
+
   var procedimentoRaw = obj.procedimento !== undefined ? obj.procedimento : contentCandidate.procedimento;
+  var criticoComStandardsFortes = tipoPop === 'critico' && popTemStandardsAuditaveisFortes_(itensCandPrev);
   var procedimentoOut =
     tipoPop === 'critico'
-      ? normalizeProcedimentoCriticoLista_(procedimentoRaw || [])
-      : normalizeStringArray_(procedimentoRaw || []);
+      ? criticoComStandardsFortes
+        ? popNormalizarProcedimentoApoioCritico_({
+            procedimentoRaw: procedimentoRaw,
+            procedimento_apoio: obj.procedimento_apoio !== undefined ? obj.procedimento_apoio : contentCandidate.procedimento_apoio,
+            etapas_principais: obj.etapas_principais !== undefined ? obj.etapas_principais : contentCandidate.etapas_principais,
+          })
+        : normalizeProcedimentoCriticoLista_(Array.isArray(procedimentoRaw) ? procedimentoRaw : [])
+      : normalizeStringArray_(procedimentoRaw !== undefined && procedimentoRaw !== null ? procedimentoRaw : []);
   var freqRaw = obj.frequencia !== undefined ? obj.frequencia : contentCandidate.frequencia;
   var freqTxtMeta = obj.frequencia_texto_operacional !== undefined ? obj.frequencia_texto_operacional : contentCandidate.frequencia_texto_operacional;
   var rawFreqStr = normalizeText_(freqRaw != null ? String(freqRaw) : '');
@@ -9318,6 +9348,12 @@ function normalizePopJsonPayload_(user, incoming) {
     donoDocumento: normalizeText_(obj.donoDocumento || contentCandidate.donoDocumento || '') || gov.donoDocumento,
     aprovadorEsperado: normalizeText_(obj.aprovador || contentCandidate.aprovador || contentCandidate.aprovadorEsperado || '') || gov.aprovadorEsperado,
     tipoFluxo: tipoPop,
+    itens_avaliaveis: (function () {
+      if (Array.isArray(rawItensAval)) return rawItensAval;
+      if (Array.isArray(contentCandidate.itens_avaliaveis)) return contentCandidate.itens_avaliaveis;
+      if (Array.isArray(contentCandidate.itensAvaliaveis)) return contentCandidate.itensAvaliaveis;
+      return [];
+    })(),
   });
 
   if (tipoPop === 'critico') {
@@ -9673,6 +9709,156 @@ function popGarantirQualidadeFase4AntesPersistir_(normalized, user, origemLog) {
   }
   popLogPersistenciaFase4_(user, origemLog || 'pop_critico_payload_pre_save', normalized, origemItens, degradacao);
   return { origem_itens: origemItens, degradacao: degradacao };
+}
+
+/**
+ * POP crítico Fase 4: procedimento como apoio quando há standards auditáveis fortes.
+ */
+function fase4SelfTestProcedimentoApoioCritico_() {
+  var user = { nome: 'Teste', perfil: 'admin' };
+  var itens = geradorConstruirStandardsAuditaveisBalcao_({ codigos_matriz_mae: ['ATD-001'], familia_prioritaria: 'ATD' });
+  function baseCritFreq() {
+    return {
+      tipo: 'critico',
+      titulo: 'POP teste apoio',
+      area: 'Atendimento e vendas',
+      processo: 'atendimento no balcão',
+      autorNome: 'Autor QA',
+      aprovador: 'Gerente QA',
+      frequencia: 'diario',
+      itens_avaliaveis: itens,
+      erro_critico: 'Erro gravíssimo no balcão com prazo curto.',
+    };
+  }
+  function tryCrit(norm) {
+    try {
+      validatePopCritico_(norm);
+      return { ok: true, err: '' };
+    } catch (e0) {
+      return { ok: false, err: String((e0 && e0.message) || e0) };
+    }
+  }
+
+  var nStrings = normalizePopJsonPayload_(
+    user,
+    JSON.parse(
+      JSON.stringify(
+        Object.assign({}, baseCritFreq(), {
+          procedimento: ['Primeiro verbo no balcão em 30 segundos', 'Registrar a dúvida em sistema ou papel'],
+        })
+      )
+    )
+  );
+  var vStrings = tryCrit(nStrings);
+  var cStr = nStrings.conteudoJson || {};
+  var caso1 =
+    vStrings.ok &&
+    Array.isArray(cStr.procedimento) &&
+    cStr.procedimento.length >= 1 &&
+    typeof cStr.procedimento[0] === 'string';
+
+  var nApoio = normalizePopJsonPayload_(
+    user,
+    JSON.parse(
+      JSON.stringify(
+        Object.assign({}, baseCritFreq(), {
+          procedimento: [],
+          procedimento_apoio: ['Linha única em 2 minutos', { descricao: 'Registrar esclarecimento antes da sugestão conforme régua de 15 cm' }],
+        })
+      )
+    )
+  );
+  var vApoio = tryCrit(nApoio);
+  var cAp = nApoio.conteudoJson || {};
+  var caso2 = vApoio.ok && cAp.procedimento.join('').indexOf('esclarecimento') >= 0;
+
+  var nVazio = normalizePopJsonPayload_(
+    user,
+    JSON.parse(JSON.stringify(Object.assign({}, baseCritFreq(), { procedimento: [], procedimento_apoio: [], etapas_principais: [] })))
+  );
+  var vVazio = tryCrit(nVazio);
+
+  var procLegado = [
+    {
+      itemId: 'T-LEG',
+      etapa: 'Etapa 1',
+      descricao: 'Registrar pergunta.',
+      acao: 'Registrar pergunta de esclarecimento antes da sugestão.',
+      criterioAvaliacao: 'Há registo audível ou escrito de pergunta antes da sugestão de produto no balcão.',
+      tipoAvaliacao: 'binario',
+      peso: '100',
+      obrigatorio: true,
+      critico: true,
+    },
+  ];
+  var nSemStd = normalizePopJsonPayload_(
+    user,
+    JSON.parse(
+      JSON.stringify({
+        tipo: 'critico',
+        titulo: 'Sem standards',
+        area: 'Operação interna',
+        processo: 'processo administrativo isolado interno arquivo',
+        autorNome: 'Autor QA',
+        aprovador: 'Gerente QA',
+        frequencia: 'diario',
+        procedimento: procLegado.slice(),
+        objetivo:
+          'Conferência documental interna em arquivo sem interação direta ou indireta de balcão com cliente nem sugestão de produto OTC.',
+      })
+    )
+  );
+  var vSemStd = tryCrit(nSemStd);
+  var caso4 = !vSemStd.ok && String(vSemStd.err || '').indexOf('standards auditáveis fortes') >= 0;
+
+  var procObj = procLegado.slice();
+  var collab = normalizePopJsonPayload_(
+    user,
+    JSON.parse(
+      JSON.stringify({
+        tipo: 'colaborativo',
+        titulo: 'POP colaborativo estrutura',
+        area: 'Atendimento e vendas',
+        processo: 'atendimento no balcão',
+        procedimento: procObj,
+        objetivo:
+          'Garantir comunicação objetiva antes de registrar sugestões com percentual mensurável nas próximas 4 semanas de operação.',
+        como_fazer_bem: ['Cumprimentar com olhar.', 'Ouvir até o final antes do próximo verbo observável'],
+        erro_critico: 'Sugerir item sem perguntar a necessidade primeiro no balcão em menos de um minuto',
+      })
+    )
+  );
+  var cCol = collab.conteudoJson || {};
+  var caso5 =
+    normalizeTipoPop_(collab.tipo) === 'colaborativo' &&
+    Array.isArray(cCol.procedimento) &&
+    cCol.procedimento.length >= 1 &&
+    typeof cCol.procedimento[0] === 'string';
+
+  var rFq = fase4SelfTestFrequenciaCriticoBalcao_();
+  var rFi = fase4SelfTestFidelidadeBriefingBalcao_();
+  var rGu = fase4SelfTestGuardCriticoSemContexto_();
+  var rRt = fase4SelfTestRoundTripStandardsPersistencia_();
+  var rSt = fase4SelfTestStandardsAuditaveisBalcao_();
+  var rCr = crivoSelfTestExecucaoPop_();
+  var rSc = scoreSelfTestConceito_();
+  var reg = rFq.ok && rFi.ok && rGu.ok && rRt.ok && rSt.ok && rCr.ok && rSc.ok;
+
+  return {
+    ok:
+      caso1 &&
+      caso2 &&
+      vVazio.ok &&
+      caso4 &&
+      caso5 &&
+      reg,
+    critico_strings_ok: caso1,
+    critico_procedimento_apoio_ok: caso2,
+    critico_procedimento_vazio_com_standards_ok: vVazio.ok,
+    critico_sem_standards_bloqueado: caso4,
+    colaborativo_procedimento_preservado: caso5,
+    regressao: reg,
+  };
 }
 
 function fase4SelfTestRoundTripStandardsViewer_() {
@@ -10061,6 +10247,7 @@ function fase4SelfTestFidelidadeBriefingBalcao_() {
 
 function fase4SelfTestFrequenciaCriticoBalcao_() {
   var user = { nome: 'Teste', perfil: 'admin' };
+  var itStandFreq = geradorConstruirStandardsAuditaveisBalcao_({ codigos_matriz_mae: ['ATD-001'], familia_prioritaria: 'ATD' });
   var fraseEvt = geradorBalcaoFrequenciaEvento_();
   function procMin() {
     return [
@@ -10096,6 +10283,7 @@ function fase4SelfTestFrequenciaCriticoBalcao_() {
     processo: 'atendimento no balcão',
     frequencia: fraseEvt,
     procedimento: procMin(),
+    itens_avaliaveis: itStandFreq,
     autorNome: 'Teste',
     aprovador: 'Gerente',
   });
@@ -10113,6 +10301,7 @@ function fase4SelfTestFrequenciaCriticoBalcao_() {
     processo: 'atendimento',
     frequencia: 'Diário',
     procedimento: procMin(),
+    itens_avaliaveis: itStandFreq,
     autorNome: 'Teste',
     aprovador: 'Gerente',
   });
@@ -10127,6 +10316,7 @@ function fase4SelfTestFrequenciaCriticoBalcao_() {
     processo: 'processo x',
     frequencia: '',
     procedimento: procMin(),
+    itens_avaliaveis: itStandFreq,
     autorNome: 'Teste',
     aprovador: 'Gerente',
   });
@@ -10140,6 +10330,7 @@ function fase4SelfTestFrequenciaCriticoBalcao_() {
     frequencia: 'por_demanda',
     frequencia_texto_operacional: fraseEvt,
     procedimento: procMin(),
+    itens_avaliaveis: itStandFreq,
     autorNome: 'Teste',
     aprovador: 'Gerente',
   });
