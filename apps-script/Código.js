@@ -3698,9 +3698,10 @@ function fase4SelfTestGeracaoIaNaoBloqueiaAntesReparoStandards_() {
   var rGu = fase4SelfTestGuardCriticoSemContexto_();
   var rRt = fase4SelfTestRoundTripStandardsPersistencia_();
   var rSt = fase4SelfTestStandardsAuditaveisBalcao_();
+  var rFa = fase4SelfTestAplicabilidadeFarmaceuticoBalcao_();
   var rCr = crivoSelfTestExecucaoPop_();
   var rSc = scoreSelfTestConceito_();
-  var reg = rPa.ok && rFq.ok && rFi.ok && rGu.ok && rRt.ok && rSt.ok && rCr.ok && rSc.ok;
+  var reg = rPa.ok && rFq.ok && rFi.ok && rGu.ok && rRt.ok && rSt.ok && rFa.ok && rCr.ok && rSc.ok;
 
   var casoFluxoPrecoce =
     freqPassouPrecoce &&
@@ -5734,6 +5735,7 @@ function fase4EnumsAplicabilidadeItem_() {
     'quando_houver_atendimento_no_balcao',
     'quando_houver_atendimento_no_balcao_com_risco_receita_duvida_tecnica_ou_inseguranca',
     'quando_houver_receita',
+    /** @deprecated Evitar em standards de balcão; mapar para balcão geral ou risco no reparo. Mantido só por compatibilidade de enum legado. */
     'quando_houver_atendimento_farmaceutico',
     'quando_houver_espera_ou_consulta_de_estoque',
     'quando_houver_fechamento_de_venda',
@@ -6774,7 +6776,7 @@ function geradorIntegrarFase4PosNormalizacao_(user, requestId, normalized, contr
     situacao: situacaoIn,
     erro: erroIn,
   });
-  cj.itens_avaliaveis = itens;
+  cj.itens_avaliaveis = popItensAvaliaveisNormalizados_(itens);
 
   var val = geradorValidarCamposEssenciaisFase4_(normalized);
   if (!val.ok) {
@@ -6802,7 +6804,7 @@ function geradorIntegrarFase4PosNormalizacao_(user, requestId, normalized, contr
   out.preview_bloqueado_publicacao =
     crivo.status_crivo === 'reprovado_no_crivo' || crivo.status_crivo === 'aprovado_com_ajuste';
 
-  var scoreC = calcularScoreExecucaoConceito_(itens);
+  var scoreC = calcularScoreExecucaoConceito_(cj.itens_avaliaveis || itens);
   out.score_conceito = scoreC;
   cj.fase4_score_conceito = scoreC;
 
@@ -7221,6 +7223,102 @@ function fase4SelfTestStandardsAuditaveisBalcao_() {
     score_crivo_ok: !!(f4.score_conceito && f4.crivo && f4.crivo.status_crivo === 'aprovado_para_operacao' && crivoItensOk),
     regressao: reg,
     detalhe: { tipos: Object.keys(tipos), pesos: Object.keys(pesos), criticos: criticos, itens: itens.length },
+  };
+}
+
+function fase4SelfTestAplicabilidadeFarmaceuticoBalcao_() {
+  var CANON = POP_APLIC_BALCAO_FARM_ENC_RISCO_;
+  var LEG = POP_APLIC_ATENDIMENTO_FARM_LEGACY_;
+  var refs = { codigos_matriz_mae: ['ATD-001'], familia_prioritaria: 'ATD' };
+  var built = geradorConstruirStandardsAuditaveisBalcao_(refs);
+  var stdFarm = null;
+  for (var bi = 0; bi < built.length; bi++) {
+    if (String((built[bi] || {}).itemId || '') === 'STD-BALCAO-ENCAMINHAMENTO-FARMACEUTICO') stdFarm = built[bi];
+  }
+  var okCatalogo = !!stdFarm && String(stdFarm.aplicabilidade || '') === CANON;
+
+  var contaminado = JSON.parse(JSON.stringify(stdFarm));
+  contaminado.aplicabilidade = LEG;
+  var saneado = popNormalizarStandardAuditavel_(contaminado);
+  var okReparoNorm = String(saneado.aplicabilidade || '') === CANON;
+
+  var outroIdx = -1;
+  for (var fj = 0; fj < built.length; fj++) {
+    if (String((built[fj] || {}).itemId || '') !== 'STD-BALCAO-ENCAMINHAMENTO-FARMACEUTICO') {
+      outroIdx = fj;
+      break;
+    }
+  }
+  var okOutroRemap = true;
+  if (outroIdx >= 0) {
+    var outro = JSON.parse(JSON.stringify(built[outroIdx]));
+    outro.aplicabilidade = LEG;
+    var o2 = popNormalizarStandardAuditavel_(outro);
+    okOutroRemap = String(o2.aplicabilidade || '') === POP_APLIC_ATENDIMENTO_BALCAO_GERAL_;
+  }
+
+  var pIn = 'atendimento no balcão';
+  var sIn = 'cliente chega com dúvida';
+  var eIn = 'atendente sugere produto sem entender a necessidade';
+  var contract = {
+    titulo: 'Atendimento ao Cliente na Farmácia',
+    area: 'Atendimento e vendas',
+    processo: pIn,
+    execucao: {
+      o_que_fazer: [
+        'Perguntar em voz audível a dúvida do cliente no balcão antes de qualquer sugestão de produto',
+        'Verificar informação no sistema e na gôndola quando necessário para orientar com segurança',
+        'Encaminhar ao farmacêutico em dúvida fora de OTC',
+      ],
+      tempo: 'imediato',
+      frequencia: 'a cada ocorrência',
+    },
+    controle: {
+      metrica:
+        '90% dos atendimentos com pergunta de necessidade registrada ou audível antes da sugestão, por auditoria quinzenal em 30 dias consecutivos',
+      criterio_sucesso: '95% sem sugestão precoce por amostragem semanal no balcão',
+      erros_graves: ['Sugerir produto sem ouvir a necessidade completa no balcão.'],
+    },
+  };
+  var normalized = {
+    tipo: 'colaborativo',
+    titulo: contract.titulo,
+    area: contract.area,
+    processo: pIn,
+    conteudoJson: {
+      objetivo:
+        'Garantir que o atendente entenda a necessidade do cliente antes de sugerir produto, reduzindo indicação inadequada e risco no balcão.',
+      regra_de_ouro: 'Em dúvida clínica, legal ou fora de OTC, chamar o farmacêutico antes de concluir o atendimento.',
+      procedimento: contract.execucao.o_que_fazer.slice(),
+      erro_critico: 'Sugerir produto no balcão sem ouvir a dúvida e sem confirmar a necessidade do cliente.',
+      metrica: contract.controle.metrica,
+    },
+  };
+  var f4 = geradorIntegrarFase4PosNormalizacao_({ id: 'f4aplic' }, 'req-aplic', normalized, contract, pIn, sIn, eIn, 'critico');
+  var itf4 = (normalized.conteudoJson && normalized.conteudoJson.itens_avaliaveis) || [];
+  var stdF4 = null;
+  for (var j = 0; j < itf4.length; j++) {
+    if (String(itf4[j].itemId || '') === 'STD-BALCAO-ENCAMINHAMENTO-FARMACEUTICO') stdF4 = itf4[j];
+  }
+  var okPipeline = f4.ok === true && !!stdF4 && String(stdF4.aplicabilidade || '') === CANON;
+
+  var nenhumLegacy = true;
+  for (var k = 0; k < itf4.length; k++) {
+    var sid = String((itf4[k] || {}).itemId || '');
+    if (sid.indexOf('STD-BALCAO-') === 0 && String((itf4[k] || {}).aplicabilidade || '') === LEG) nenhumLegacy = false;
+  }
+
+  var rCr = crivoSelfTestExecucaoPop_();
+  var rSc = scoreSelfTestConceito_();
+
+  return {
+    ok: !!(okCatalogo && okReparoNorm && okOutroRemap && okPipeline && nenhumLegacy && rCr.ok && rSc.ok),
+    encaminamento_aplic_canonica: okCatalogo,
+    saneamento_pos_ia: okReparoNorm,
+    remap_outro_std_bal: okOutroRemap,
+    pipeline_f4_smoke: okPipeline,
+    nenhum_std_bal_com_farmaceutico_legacy: nenhumLegacy,
+    regressao_crivo_score: !!(rCr.ok && rSc.ok),
   };
 }
 
@@ -9560,6 +9658,32 @@ function normalizePopJsonPayload_(user, incoming) {
   };
 }
 
+/** Gatilho canónico para encaminhamento farmacêutico no balcão (não equivale a "já há atendimento farmacêutico"). */
+var POP_APLIC_BALCAO_FARM_ENC_RISCO_ = 'quando_houver_atendimento_no_balcao_com_risco_receita_duvida_tecnica_ou_inseguranca';
+var POP_APLIC_ATENDIMENTO_FARM_LEGACY_ = 'quando_houver_atendimento_farmaceutico';
+var POP_APLIC_ATENDIMENTO_BALCAO_GERAL_ = 'quando_houver_atendimento_no_balcao';
+
+/**
+ * Fixa aplicabilidade de STD-BALCAO-* quando a IA/envio persistiu slug legado errado mas o item já é auditável forte.
+ * @returns {Object} mesmo objeto (mutado).
+ */
+function popCorrigirAplicabilidadesStandardsBalcaoAuditavel_(item) {
+  var out = item || {};
+  var id = String(out.itemId || '');
+  var cod = String(out.codigo_matriz_mae || out.codigo || '').trim();
+  var aplic = String(out.aplicabilidade || '').trim();
+  var isEncFarm = id === 'STD-BALCAO-ENCAMINHAMENTO-FARMACEUTICO' || cod === 'ATD-015';
+  if (isEncFarm) {
+    out.aplicabilidade = POP_APLIC_BALCAO_FARM_ENC_RISCO_;
+    return out;
+  }
+  var isStdBal = id.indexOf('STD-BALCAO-') === 0;
+  if (isStdBal && aplic === POP_APLIC_ATENDIMENTO_FARM_LEGACY_) {
+    out.aplicabilidade = POP_APLIC_ATENDIMENTO_BALCAO_GERAL_;
+  }
+  return out;
+}
+
 function popNormalizarStandardAuditavel_(item) {
   var it = item || {};
   var out = Object.assign({}, it);
@@ -9591,7 +9715,7 @@ function popNormalizarStandardAuditavel_(item) {
   if (out.prazo_correcao == null) out.prazo_correcao = '';
   if (!out.status_correcao) out.status_correcao = 'pendente_avaliacao';
   if (out.data_reauditoria_prevista === undefined) out.data_reauditoria_prevista = null;
-  return out;
+  return popCorrigirAplicabilidadesStandardsBalcaoAuditavel_(out);
 }
 
 function popItensAvaliaveisNormalizados_(conteudoOuItens) {
@@ -9599,7 +9723,9 @@ function popItensAvaliaveisNormalizados_(conteudoOuItens) {
     ? conteudoOuItens
     : ((conteudoOuItens && (conteudoOuItens.itens_avaliaveis || conteudoOuItens.itensAvaliaveis)) || []);
   if (!Array.isArray(raw)) return [];
-  return raw.map(function (it) { return popNormalizarStandardAuditavel_(it); });
+  return raw.map(function (it) {
+    return popNormalizarStandardAuditavel_(it);
+  });
 }
 
 function popTemStandardsAuditaveisFortes_(conteudoOuItens) {

@@ -5152,6 +5152,56 @@
       return String(el.value || '').split('\n').map(v => v.trim()).filter(Boolean);
     }
 
+    /** Viewer POP crítico (compacto): audit layer antes de etapas; smoke @123. */
+    function fase4SelfTestViewerCriticoTopoAuditavel_() {
+      const fx = geradorSelfTestStandardsViewerFixture_();
+      const c = deepCloneJsonSafe_(fx.conteudoJson || {});
+      c.diretriz_executiva = 'Priorizar segurança e auditabilidade no balcão antes de qualquer jornada apenas procedural.';
+      c.erro_critico = 'Sugerir produto sem ouvir e confirmar a necessidade do cliente.';
+      c.procedimento = ['Apoio: identificar dúvida', 'Apoio: perguntar antes de sugerir', 'Apoio: encaminhar com clareza'];
+      const pop = {
+        tipo: 'critico',
+        titulo: fx.titulo,
+        codigo: 'POP-QA',
+        area: fx.area,
+        processo: fx.processo,
+        status: 'rascunho',
+        lido: false,
+        checklistObj: [{ descricao: 'Registrar pergunta de esclarecimento' }, { descricao: 'Confirmar próximo passo com o cliente' }],
+        conteudoObj: c,
+      };
+      const html = renderPopHtmlExec_(pop);
+      const iRasc = html.indexOf('RASCUNHO');
+      const iDir = html.indexOf('Diretriz executiva');
+      const iErro = html.indexOf('aria-label="Erro crítico"');
+      const iStd = html.indexOf('aria-label="Standards auditáveis"');
+      const iChk = html.indexOf('aria-label="Checklist operacional"');
+      const iEtap = html.indexOf('aria-label="Etapas principais apoio"');
+      const iJHead = html.indexOf('pop-journey-mini-label');
+      const prioridadeAuditoria =
+        iStd > 0 &&
+        iEtap > 0 &&
+        iStd < iEtap &&
+        (iChk < 0 || iStd < iChk) &&
+        iErro > 0 &&
+        iErro < iStd &&
+        iDir > 0 &&
+        iErro > iDir &&
+        iRasc >= 0 &&
+        iDir > iRasc &&
+        (iJHead < 0 || iStd < iJHead);
+      const rRt = fase4SelfTestRoundTripStandardsViewer_();
+      return {
+        ok:
+          !!(prioridadeAuditoria && rRt.ok && html.indexOf('Execução conforme descrição da etapa') < 0 && html.indexOf('sem ouvir') >= 0),
+        topo_rascunho_e_diretriz_antes_erro: !!(iRasc >= 0 && iDir > iRasc && iErro > iDir),
+        standards_no_resumo_antes_etapas: !!(iStd > 0 && iEtap > 0 && iStd < iEtap),
+        checklist_apos_standards_antes_etapas: !!(iStd > 0 && iChk > 0 && iEtap > 0 && iStd < iChk && iChk < iEtap),
+        jornada_mini_apos_auditoria: iJHead < 0 || iStd < iJHead,
+        regressao_round_trip_standards_viewer: rRt.ok,
+      };
+    }
+
     function fase4SelfTestRoundTripStandardsViewer_() {
       const std = geradorSelfTestStandardsViewerFixture_();
       const original = deepCloneJsonSafe_(std.conteudoJson);
@@ -5714,6 +5764,25 @@
       return out;
     }
 
+    function renderPopExecStandardsResumoHtml_(items) {
+      const arr = Array.isArray(items) ? items : [];
+      if (!arr.length || !temStandardsAuditaveis_(arr)) return '';
+      const lines = arr.map(function (it) {
+        const id = String(viewerCampoLegivel_(it.itemId || it.codigo || '') || '').trim() || 'Standard';
+        let pad = String(viewerCampoLegivel_(it.padrao) || '').trim();
+        if (pad.length > 190) pad = pad.slice(0, 187) + '…';
+        return '<li><strong>' + escapeHtml(id) + '</strong><span> — ' + escapeHtml(pad || '—') + '</span></li>';
+      });
+      return (
+        '<section class="pop-exec-sec pop-exec-standards" aria-label="Standards auditáveis">' +
+        '<h2>Standards auditáveis</h2>' +
+        '<p class="muted" style="font-size:13px;margin:0 0 8px 0;">Camada auditável principal (detalhe completo em Ver detalhes).</p>' +
+        '<ul>' +
+        lines.join('') +
+        '</ul></section>'
+      );
+    }
+
     function renderPopHtmlExec_(pop) {
       const c = pop.conteudoObj || {};
       const etapas = popExecPickEtapasParaBalcao_(popExecLinhasProcedimento_(pop, c));
@@ -5730,7 +5799,12 @@
       const hideChk = checks.length === 0;
       const hideSteps = etapas.length === 0;
 
+      const tipoCritico = String(pop.tipo || '').toLowerCase() === 'critico';
+      const standardsItems = tipoCritico ? standardsAuditaveisDoConteudo_(c) : [];
+
       let body = '<div class="pop-exec-wrap">';
+      body += renderRascunhoAlertHtml_(pop);
+
       body += '<div class="pop-exec-head">';
       body += '<h1>' + escapeHtml(viewerCampoLegivel_(pop.titulo)) + '</h1>';
       const cod = String(viewerCampoLegivel_(pop.codigo) || '').trim();
@@ -5741,34 +5815,84 @@
       if (ar) metaBits.push(ar);
       if (pr) metaBits.push(pr);
       body += '<p class="pop-exec-meta">' + escapeHtml(metaBits.join(' · ')) + '</p>';
-      body += '<div class="muted" style="font-size:13px;">' + renderPopJourneyCompactHtml_(pop) + '</div>';
+      if (!tipoCritico) {
+        body += '<div class="muted" style="font-size:13px;">' + renderPopJourneyCompactHtml_(pop) + '</div>';
+      }
       body += '</div>';
 
-      if (!hideSteps) {
-        body += '<section class="pop-exec-sec pop-exec-steps" aria-label="Etapas principais">';
-        body += '<h2>Etapas principais</h2><ol>';
-        etapas.forEach(function (linha) {
-          body += '<li>' + escapeHtml(linha) + '</li>';
-        });
-        body += '</ol></section>';
-      }
-      if (!hideComo) {
-        body += '<section class="pop-exec-sec" aria-label="Como fazer bem">';
-        body += '<h2>Como fazer bem</h2>';
-        body += '<div class="pop-exec-line">' + escapeHtml(como) + '</div></section>';
-      }
-      if (!hideErro) {
-        body += '<section class="pop-exec-sec" aria-label="Erro crítico">';
-        body += '<h2>Erro crítico</h2>';
-        body += '<div class="pop-exec-line">' + escapeHtml(erro) + '</div></section>';
-      }
-      if (!hideChk) {
-        body += '<section class="pop-exec-sec pop-exec-check" aria-label="Checklist operacional">';
-        body += '<h2>Checklist operacional</h2><ul>';
-        checks.forEach(function (linha) {
-          body += '<li>' + escapeHtml(linha) + '</li>';
-        });
-        body += '</ul></section>';
+      if (tipoCritico) {
+        const dirTxt = viewerTextoUtil_(c.diretriz_executiva);
+        if (dirTxt) {
+          body +=
+            '<section class="pop-exec-sec" aria-label="Diretriz executiva"><h2>Diretriz executiva</h2><div class="pop-exec-line">' +
+            escapeHtml(dirTxt) +
+            '</div></section>';
+        }
+        const regraTxt = viewerTextoUtil_(c.regra_de_ouro);
+        if (regraTxt) {
+          body +=
+            '<section class="pop-exec-sec" aria-label="Regra de ouro"><h2>Regra de ouro</h2><div class="pop-exec-line">' +
+            escapeHtml(regraTxt) +
+            '</div></section>';
+        }
+        if (!hideErro) {
+          body +=
+            '<section class="pop-exec-sec" aria-label="Erro crítico"><h2>Erro crítico</h2><div class="pop-exec-line">' +
+            escapeHtml(erro) +
+            '</div></section>';
+        }
+        body += renderPopExecStandardsResumoHtml_(standardsItems);
+        if (!hideChk) {
+          body += '<section class="pop-exec-sec pop-exec-check" aria-label="Checklist operacional">';
+          body += '<h2>Checklist operacional</h2><ul>';
+          checks.forEach(function (linha) {
+            body += '<li>' + escapeHtml(linha) + '</li>';
+          });
+          body += '</ul></section>';
+        }
+        if (!hideComo) {
+          body += '<section class="pop-exec-sec" aria-label="Como fazer bem">';
+          body += '<h2>Como fazer bem</h2>';
+          body += '<div class="pop-exec-line">' + escapeHtml(como) + '</div></section>';
+        }
+        if (!hideSteps) {
+          body +=
+            '<details class="pop-exec-sec pop-exec-steps-details" aria-label="Etapas principais apoio"><summary><strong>Etapas principais</strong> <span class="muted">apoio operacional</span></summary>' +
+            '<ol style="margin-top:10px;">';
+          etapas.forEach(function (linha) {
+            body += '<li>' + escapeHtml(linha) + '</li>';
+          });
+          body += '</ol></details>';
+        }
+        body +=
+          '<p class="muted" style="font-size:13px;margin-top:10px;">' + renderPopJourneyCompactHtml_(pop) + '</p>';
+      } else {
+        if (!hideSteps) {
+          body += '<section class="pop-exec-sec pop-exec-steps" aria-label="Etapas principais">';
+          body += '<h2>Etapas principais</h2><ol>';
+          etapas.forEach(function (linha) {
+            body += '<li>' + escapeHtml(linha) + '</li>';
+          });
+          body += '</ol></section>';
+        }
+        if (!hideComo) {
+          body += '<section class="pop-exec-sec" aria-label="Como fazer bem">';
+          body += '<h2>Como fazer bem</h2>';
+          body += '<div class="pop-exec-line">' + escapeHtml(como) + '</div></section>';
+        }
+        if (!hideErro) {
+          body += '<section class="pop-exec-sec" aria-label="Erro crítico">';
+          body += '<h2>Erro crítico</h2>';
+          body += '<div class="pop-exec-line">' + escapeHtml(erro) + '</div></section>';
+        }
+        if (!hideChk) {
+          body += '<section class="pop-exec-sec pop-exec-check" aria-label="Checklist operacional">';
+          body += '<h2>Checklist operacional</h2><ul>';
+          checks.forEach(function (linha) {
+            body += '<li>' + escapeHtml(linha) + '</li>';
+          });
+          body += '</ul></section>';
+        }
       }
 
       body +=
@@ -5777,7 +5901,7 @@
         '</div>' +
         '<div id="popViewFullInline" class="pop-full-inline hidden" aria-hidden="true"></div>';
 
-      if (hideSteps && hideComo && hideErro && hideChk) {
+      if (hideSteps && hideComo && hideErro && hideChk && (!tipoCritico || !standardsItems.length)) {
         body +=
           '<p class="muted" style="margin:16px 0;">Sem conteúdo operacional resumido neste POP. Toque em <strong>Ver detalhes</strong> abaixo para o documento completo.</p>';
       }
