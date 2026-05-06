@@ -732,6 +732,38 @@
       color:#fff;
     }
 
+    .metrica-verificacao-list{
+      margin:0;
+      padding-left:22px;
+    }
+    .metrica-verificacao-list li{
+      margin:10px 0;
+      font-size:14px;
+      line-height:1.62;
+      color:#1e293b;
+    }
+
+    .doc-meta-grid--standards{
+      grid-template-columns:repeat(auto-fill,minmax(140px,1fr));
+      gap:10px;
+      margin-top:10px;
+    }
+    .doc-meta-grid--standards div{
+      background:#f1f5f9;
+      border:1px solid #cbd5e1;
+      box-shadow:none;
+      backdrop-filter:none;
+      border-radius:12px;
+    }
+    .doc-meta-grid--standards span{
+      color:#475569;
+    }
+    .doc-meta-grid--standards strong{
+      color:#0f172a;
+      font-weight:700;
+      word-break:break-word;
+    }
+
     .pop-journey-outer{
       max-width:1100px;
       margin:0 auto 18px;
@@ -1797,9 +1829,9 @@
           <p id="pop_form_note_critico" class="form-note hidden">POP crítico: preencha os campos do documento e os itens avaliáveis. Envie para aprovação quando estiver completo — o documento só vale operacionalmente após publicado (vigente).</p>
 
           <div class="actions">
-            <button onclick="salvarPop()">Salvar POP</button>
+            <button type="button" id="pop_btn_salvar" onclick="salvarPop()">Salvar POP</button>
             <button type="button" class="secondary hidden" id="pop_btn_enviar_aprovacao_form" onclick="enviarAprovacaoDesdeFormPop_()">Enviar aprovação</button>
-            <button type="button" class="secondary" onclick="salvarPopEEnviarAprovacao()">Salvar e enviar para aprovação</button>
+            <button type="button" class="secondary" id="pop_btn_salvar_enviar" onclick="salvarPopEEnviarAprovacao()">Salvar e enviar para aprovação</button>
           </div>
           <p id="popMsg" class="muted"></p>
         </div>
@@ -2736,6 +2768,98 @@
 
       const f = runner[fnName];
       if (typeof f !== 'function') {
+        showToast('Backend incompatível: ' + fnName, 'error');
+        return;
+      }
+      return f.apply(runner, args || []);
+    }
+
+    let __popSaveBusy = false;
+
+    function popFormEnumerateSaveRelatedButtons_() {
+      const ids = ['pop_btn_salvar', 'pop_btn_salvar_enviar', 'pop_btn_enviar_aprovacao_form'];
+      const out = [];
+      ids.forEach(function (id) {
+        const el = document.getElementById(id);
+        if (el) out.push(el);
+      });
+      return out;
+    }
+
+    /** Bloqueio duplo clique + texto “Salvando…” durante gravações no formulário POP. */
+    function beginPopFormSavingState_(opts) {
+      if (__popSaveBusy) return false;
+      __popSaveBusy = true;
+      const msg = (opts && opts.message) || 'Salvando POP, aguarde…';
+      const popMsg = document.getElementById('popMsg');
+      if (popMsg) popMsg.textContent = msg;
+      popFormEnumerateSaveRelatedButtons_().forEach(function (el) {
+        el.setAttribute('data-pop-save-prev-disabled', el.disabled ? '1' : '0');
+        el.setAttribute('data-pop-save-prev-text', String(el.textContent || '').trim());
+        el.disabled = true;
+        if (!el.classList.contains('hidden')) el.textContent = 'Salvando…';
+      });
+      return true;
+    }
+
+    function endPopFormSavingState_() {
+      if (!__popSaveBusy) return;
+      __popSaveBusy = false;
+      popFormEnumerateSaveRelatedButtons_().forEach(function (el) {
+        const pt = el.getAttribute('data-pop-save-prev-text');
+        if (pt != null) {
+          el.textContent = pt;
+          el.removeAttribute('data-pop-save-prev-text');
+        }
+        const pd = el.getAttribute('data-pop-save-prev-disabled');
+        if (pd != null) {
+          el.disabled = pd === '1';
+          el.removeAttribute('data-pop-save-prev-disabled');
+        }
+      });
+    }
+
+    /** Variante callBackend para salvar POP: garante unlock da UI em falhas (rede/session/ok:false). */
+    function callBackendPopDraft_(fnName, args, onOk, onFail) {
+      const myEpoch = authLoadEpoch_;
+      const runner = google.script.run
+        .withFailureHandler(err => {
+          if (myEpoch !== authLoadEpoch_) return;
+          endPopFormSavingState_();
+          const raw = formatBackendError_(fnName, err, 'Erro ao salvar');
+          const msg = '[' + fnName + '] ' + raw;
+          try {
+            console.error('[callBackendPopDraft]', fnName, err);
+          } catch (e) {}
+          if (isSessionAuthErrorMessage_(msg)) {
+            forceLoginViewDueToSession_(msg);
+            return;
+          }
+          showToast(msg, 'error');
+          if (typeof onFail === 'function') onFail({ type: 'failure', detail: raw });
+        })
+        .withSuccessHandler(res => {
+          if (myEpoch !== authLoadEpoch_) return;
+          if (!res || res.ok === false) {
+            endPopFormSavingState_();
+            const raw = formatBackendError_(fnName, res, 'Erro ao salvar');
+            const msg = '[' + fnName + '] ' + raw;
+            try {
+              console.error('[callBackendPopDraft]', fnName, 'ok:false', res);
+            } catch (e2) {}
+            if (isSessionAuthErrorMessage_(msg)) {
+              forceLoginViewDueToSession_(msg);
+              return;
+            }
+            showToast(msg, 'error');
+            if (typeof onFail === 'function') onFail({ type: 'ok_false', detail: res });
+            return;
+          }
+          onOk && onOk(res);
+        });
+      const f = runner[fnName];
+      if (typeof f !== 'function') {
+        endPopFormSavingState_();
         showToast('Backend incompatível: ' + fnName, 'error');
         return;
       }
@@ -4995,6 +5119,7 @@
     function salvarPop() {
       const data = buildPopSavePayload_();
       if (!data) return;
+      if (!beginPopFormSavingState_({ message: 'Salvando POP, aguarde…' })) return;
 
       const popIdEdicao = valueOf('pop_id');
       const colabUi = !popIsCriticoUi_();
@@ -5002,7 +5127,8 @@
         ? ['editarPop', [currentToken, popIdEdicao, data]]
         : ['criarPop', [currentToken, data]];
 
-      callBackend(backendCall[0], backendCall[1], (res) => {
+      callBackendPopDraft_(backendCall[0], backendCall[1], (res) => {
+        endPopFormSavingState_();
         markPopIaFunnelCompleted_();
         document.getElementById('popMsg').innerText = (res.message || 'POP salvo.') + (res.codigo ? ' Código: ' + res.codigo : '');
         showToast(res.message || 'POP salvo.', 'success');
@@ -5024,22 +5150,24 @@
           clearPopForm();
           showSection('portalSection');
         });
-      });
+      }, () => {});
     }
 
     function salvarPopEEnviarAprovacao() {
       const data = buildPopSavePayload_();
       if (!data) return;
+      if (!beginPopFormSavingState_({ message: 'Salvando POP e enviando para aprovação, aguarde…' })) return;
 
       const popIdEdicao = valueOf('pop_id');
       const backendCall = popIdEdicao
         ? ['editarPop', [currentToken, popIdEdicao, data]]
         : ['criarPop', [currentToken, data]];
 
-      callBackend(backendCall[0], backendCall[1], (res) => {
+      callBackendPopDraft_(backendCall[0], backendCall[1], (res) => {
         const pidNovo = res && (res.popId || res.pop_id);
         const pid = String(popIdEdicao || pidNovo || '').trim();
         if (!pid) {
+          endPopFormSavingState_();
           document.getElementById('popMsg').innerText =
             (res.message || 'POP salvo.') +
             (res.codigo ? ' Código: ' + res.codigo : '') +
@@ -5052,10 +5180,14 @@
         if (hid && !popIdEdicao) hid.value = pid;
         atualizarVisibilidadeBotaoEnviarAprovacaoForm_();
 
-        callBackend(
+        const popMsgEl = document.getElementById('popMsg');
+        if (popMsgEl) popMsgEl.textContent = 'Enviando para aprovação, aguarde…';
+
+        callBackendPopDraft_(
           'submeterPopAprovacao',
           [currentToken, pid],
           () => {
+            endPopFormSavingState_();
             armPopIaAbandonAprovacaoPhase_();
             document.getElementById('popMsg').innerText = 'POP salvo e enviado para aprovação.';
             showToast('POP salvo e enviado para aprovação.', 'success');
@@ -5064,19 +5196,19 @@
               showSection('portalSection');
             });
           },
-          (subRes) => {
-            const det = formatBackendError_('submeterPopAprovacao', subRes, 'Falha ao enviar para aprovação.');
+          function (why) {
+            var subRes = why && why.detail != null ? why.detail : {};
+            var det = formatBackendError_('submeterPopAprovacao', subRes, 'Falha ao enviar para aprovação.');
             document.getElementById('popMsg').innerText =
               'POP foi salvo em rascunho, mas o envio para aprovação não concluiu: ' +
               det +
               ' Tente novamente ou use o botão Enviar aprovação na lista.';
-            showToast('POP salvo; envio para aprovação falhou. Veja a mensagem abaixo ou use a lista.', 'error');
             carregarPortal(function () {
               atualizarVisibilidadeBotaoEnviarAprovacaoForm_();
             });
-          }
+          },
         );
-      });
+      }, () => {});
     }
 
     function clearPopForm(opts) {
@@ -5199,6 +5331,69 @@
         checklist_apos_standards_antes_etapas: !!(iStd > 0 && iChk > 0 && iEtap > 0 && iStd < iChk && iChk < iEtap),
         jornada_mini_apos_auditoria: iJHead < 0 || iStd < iJHead,
         regressao_round_trip_standards_viewer: rRt.ok,
+      };
+    }
+
+    /** Smoke @124: metadados de standards legíveis (grid dedicado vs branco/claro genérico). */
+    function fase4SelfTestViewerStandardsContraste_() {
+      const fx = geradorSelfTestStandardsViewerFixture_();
+      const html = renderCriticoProcedimentoViewerHtml_(fx.conteudoJson.itens_avaliaveis || []);
+      const classe = html.indexOf('doc-meta-grid--standards') >= 0;
+      const semExecGenerico = html.indexOf('Execução conforme descrição da etapa') < 0;
+      const okContrasteMarcado = classe && html.indexOf('doc-meta-grid doc-meta-grid--standards') >= 0;
+      return {
+        ok: !!(okContrasteMarcado && semExecGenerico && html.indexOf('Não informado') < 0),
+        grid_standards_escuro_sobre_soft: okContrasteMarcado,
+      };
+    }
+
+    function fase4SelfTestViewerMetricaLista_() {
+      const h = renderMetricaViewerCardHtml_('Uma só linha de métrica.');
+      const h3 = renderMetricaViewerCardHtml_("1) indicador de teste com %.\n\n2) segunda linha com encaminhar farmacêutico.\n\n3) próximo passo claro em fechamentos.");
+      const ok =
+        h.indexOf('<ul') < 0 &&
+        h.indexOf('<p>') >= 0 &&
+        h3.indexOf('metrica-verificacao-list') >= 0 &&
+        h3.split('<li>').length >= 4;
+      return {
+        ok: !!(ok && h.indexOf('Execução conforme') < 0 && h3.indexOf('Execução conforme') < 0),
+        lista_para_multi_linha: !!(h3.indexOf('<li>') >= 0 && h3.split('<li>').length >= 4),
+      };
+    }
+
+    /** Smoke @124: botões de salvar POP usam estado de carregamento. */
+    function fase4SelfTestSalvarPopLoadingState_() {
+      const wiringSalvar =
+        typeof salvarPop === 'function' &&
+        String(salvarPop).indexOf('beginPopFormSavingState_') >= 0 &&
+        String(salvarPop).indexOf('callBackendPopDraft_') >= 0 &&
+        String(salvarPop).indexOf('endPopFormSavingState_') >= 0;
+      const wiringDois =
+        typeof salvarPopEEnviarAprovacao === 'function' &&
+        String(salvarPopEEnviarAprovacao).indexOf('beginPopFormSavingState_') >= 0 &&
+        String(salvarPopEEnviarAprovacao).indexOf('callBackendPopDraft_') >= 0;
+      const draft =
+        typeof callBackendPopDraft_ === 'function' &&
+        String(callBackendPopDraft_).indexOf('endPopFormSavingState_') >= 0;
+      const els =
+        !!document.getElementById('pop_btn_salvar') &&
+        !!document.getElementById('pop_btn_salvar_enviar') &&
+        !!document.getElementById('pop_btn_enviar_aprovacao_form');
+      return {
+        ok: !!(wiringSalvar && wiringDois && draft && els),
+        botoes_refs_ok: els,
+      };
+    }
+
+    function fase4SelfTestViewerUx124Cliente_() {
+      const a = fase4SelfTestViewerStandardsContraste_();
+      const b = fase4SelfTestSalvarPopLoadingState_();
+      const c = fase4SelfTestViewerMetricaLista_();
+      return {
+        ok: !!(a.ok && b.ok && c.ok),
+        standards_contraste: a,
+        salvamento_loading: b,
+        metrica_lista_viewer: c,
       };
     }
 
@@ -5440,6 +5635,34 @@
       return s;
     }
 
+    /** Métrica com várias linhas vira lista no viewer (smoke @124). */
+    function renderMetricaViewerCardHtml_(metricaRaw) {
+      const t = viewerTextoUtil_(metricaRaw);
+      if (!t) return '';
+      const lines = String(t)
+        .split(/\r?\n+/)
+        .map(function (s) {
+          return String(s || '').trim();
+        })
+        .filter(Boolean);
+      if (!lines.length) return '';
+      if (lines.length === 1) {
+        return (
+          '<div class="doc-card"><h3>Métrica / verificação</h3><p>' + escapeHtml(lines[0]) + '</p></div>'
+        );
+      }
+      return (
+        '<div class="doc-card"><h3>Métrica / verificação</h3>' +
+        '<ul class="metrica-verificacao-list">' +
+        lines
+          .map(function (line) {
+            return '<li>' + escapeHtml(line) + '</li>';
+          })
+          .join('') +
+        '</ul></div>'
+      );
+    }
+
     function renderCriticoProcedimentoViewerHtml_(items) {
       const arr = Array.isArray(items) ? items : [];
       if (!arr.length) return '<div class="doc-block"><h2>Itens avaliáveis</h2><p class="empty-text">Não informado.</p></div>';
@@ -5450,7 +5673,7 @@
               '<article class="doc-card" style="margin-bottom:14px;border-left:4px solid #1d4ed8;">' +
               '<h3>' + escapeHtml(viewerCampoLegivel_(it.itemId || it.codigo || it.codigo_matriz_mae)) + '</h3>' +
               '<p><strong>Padrão:</strong> ' + escapeHtml(viewerCampoLegivel_(it.padrao)) + '</p>' +
-              '<div class="doc-meta-grid" style="margin:12px 0;">' +
+              '<div class="doc-meta-grid doc-meta-grid--standards" style="margin:12px 0;">' +
               '<div><span>Seção</span><strong>' + escapeHtml(viewerCampoLegivel_(it.secao)) + '</strong></div>' +
               '<div><span>Dimensão</span><strong>' + escapeHtml(viewerCampoLegivel_(it.dimensao)) + '</strong></div>' +
               '<div><span>Classificação</span><strong>' + escapeHtml(viewerCampoLegivel_(it.classificacao)) + '</strong></div>' +
@@ -6050,8 +6273,8 @@
       const desvMetrica = [];
       const desviosHtml = renderCardIfUseful_('Desvios / ação corretiva', c.desvios);
       if (desviosHtml) desvMetrica.push(desviosHtml);
-      const metricaText = viewerTextoUtil_(c.metrica);
-      if (metricaText) desvMetrica.push('<div class="doc-card"><h3>Métrica / verificação</h3><p>' + escapeHtml(metricaText) + '</p></div>');
+      const metricaBlock = renderMetricaViewerCardHtml_(c.metrica);
+      if (metricaBlock) desvMetrica.push(metricaBlock);
       if (desvMetrica.length) html += '<div class="doc-grid">' + desvMetrica.join('') + '</div>';
 
       html += renderTextBlockIfUseful_('Treinamento', c.treinamento);

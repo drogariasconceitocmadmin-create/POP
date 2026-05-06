@@ -3699,9 +3699,10 @@ function fase4SelfTestGeracaoIaNaoBloqueiaAntesReparoStandards_() {
   var rRt = fase4SelfTestRoundTripStandardsPersistencia_();
   var rSt = fase4SelfTestStandardsAuditaveisBalcao_();
   var rFa = fase4SelfTestAplicabilidadeFarmaceuticoBalcao_();
+  var rMx = fase4SelfTestMetricaBalcaoConceito_();
   var rCr = crivoSelfTestExecucaoPop_();
   var rSc = scoreSelfTestConceito_();
-  var reg = rPa.ok && rFq.ok && rFi.ok && rGu.ok && rRt.ok && rSt.ok && rFa.ok && rCr.ok && rSc.ok;
+  var reg = rPa.ok && rFq.ok && rFi.ok && rGu.ok && rRt.ok && rSt.ok && rFa.ok && rMx.ok && rCr.ok && rSc.ok;
 
   var casoFluxoPrecoce =
     freqPassouPrecoce &&
@@ -6129,6 +6130,43 @@ function geradorBalcaoFrequenciaEvento_() {
 }
 
 /**
+ * Métrica composta mínima (Conceito / auditabilidade) para POP crítico de balcão.
+ * @returns {string}
+ */
+function geradorBalcaoMetricaConceitoComposta_() {
+  return (
+    '1) >=90% dos atendimentos amostrados com pergunta de esclarecimento registada ou audível antes de sugerir produto (amostragem semanal ou quinzenal num período de 30 dias).\n\n' +
+    '2) 100% dos casos com risco, receita, dúvida técnica ou insegurança encaminhados ao farmacêutico de plantão conforme POP (painel semanal + registo de exceção quando aplicável).\n\n' +
+    '3) >=95% dos encerramentos com próximo passo claro confirmado com o cliente (mínimo 20 observações de campo por mês com checklist sim/não).'
+  );
+}
+
+/**
+ * Heurística: métrica já cobre pergunta antes da sugestão, encaminhamento sensível e fechamento com próximo passo.
+ * @param {string} metricaStr
+ * @returns {boolean}
+ */
+function geradorMetricaBalcaoConceitoSuficiente_(metricaStr) {
+  var t = String(metricaStr || '').trim();
+  if (t.length < 100) return false;
+  var b = iaBagNorm_(t);
+  var pct = String(t.match(/%/g) || []).length;
+  var temPerc = pct >= 2 || b.indexOf('90') >= 0 || b.indexOf('95') >= 0 || b.indexOf('100') >= 0;
+  var temPerg = b.indexOf('pergunt') >= 0 || b.indexOf('esclarec') >= 0 || (b.indexOf('antes') >= 0 && b.indexOf('suger') >= 0);
+  var temEnc =
+    (b.indexOf('farmac') >= 0 && b.indexOf('encaminh') >= 0) ||
+    (b.indexOf('risco') >= 0 && b.indexOf('encaminh') >= 0) ||
+    (b.indexOf('receita') >= 0 && b.indexOf('encaminh') >= 0) ||
+    (b.indexOf('duvida tecnica') >= 0 && b.indexOf('encaminh') >= 0) ||
+    b.indexOf('inseguran') >= 0;
+  var temFech =
+    (b.indexOf('proxim') >= 0 && b.indexOf('passo') >= 0 && b.indexOf('clar') >= 0) ||
+    (b.indexOf('encerr') >= 0 && b.indexOf('proxim') >= 0) ||
+    (b.indexOf('fecham') >= 0 && b.indexOf('passo') >= 0);
+  return !!(temPerc && temPerg && temEnc && temFech);
+}
+
+/**
  * @param {Object} cj conteudoJson
  */
 function geradorEnriquecerCamposViewerBalcao_(cj) {
@@ -6203,8 +6241,8 @@ function geradorForcarBlocosOperacionaisBalcao_(cj, contract, situacaoIn, erroIn
   if (geradorCampoTextoMortoF4_(cj.regra_de_ouro)) {
     cj.regra_de_ouro = 'Perguntar e confirmar a necessidade do cliente antes de sugerir produto no balcão.';
   }
-  if (geradorCampoTextoMortoF4_(cj.metrica)) {
-    cj.metrica = 'Auditar semanalmente 5 atendimentos e registrar se houve pergunta de esclarecimento antes da sugestão de produto.';
+  if (geradorCampoTextoMortoF4_(cj.metrica) || !geradorMetricaBalcaoConceitoSuficiente_(cj.metrica)) {
+    cj.metrica = geradorBalcaoMetricaConceitoComposta_();
   }
   cj.frequencia = 'por_demanda';
   cj.frequencia_texto_operacional = geradorBalcaoFrequenciaEvento_();
@@ -7319,6 +7357,39 @@ function fase4SelfTestAplicabilidadeFarmaceuticoBalcao_() {
     pipeline_f4_smoke: okPipeline,
     nenhum_std_bal_com_farmaceutico_legacy: nenhumLegacy,
     regressao_crivo_score: !!(rCr.ok && rSc.ok),
+  };
+}
+
+/**
+ * Smoke @124: métrica composta mínima (3 indicadores) para POP crítico de balcão.
+ */
+function fase4SelfTestMetricaBalcaoConceito_() {
+  var cjMorta = {};
+  geradorForcarBlocosOperacionaisBalcao_(cjMorta, {}, '', 'atendente sugere produto sem entender a necessidade');
+  var mx0 = String(cjMorta.metrica || '');
+  var okMorta =
+    geradorMetricaBalcaoConceitoSuficiente_(mx0) &&
+    mx0.indexOf('Execução conforme') < 0 &&
+    mx0.indexOf('Não informado') < 0 &&
+    iaMotorQaMetricaOperacionalOk_(mx0);
+
+  var cjFraca = { erro_critico: 'Erro exemplo', metrica: 'Número de atendimentos com sugestões inadequadas por semana' };
+  geradorForcarBlocosOperacionaisBalcao_(cjFraca, {}, '', 'atendente sugere produto');
+  var okSubst = geradorMetricaBalcaoConceitoSuficiente_(String(cjFraca.metrica || ''));
+
+  var comp = geradorBalcaoMetricaConceitoComposta_();
+  var okComp = geradorMetricaBalcaoConceitoSuficiente_(comp) && iaMotorQaMetricaOperacionalOk_(comp);
+
+  var cjPres = { erro_critico: 'x', metrica: comp };
+  geradorForcarBlocosOperacionaisBalcao_(cjPres, {}, '', '');
+  var preserva = String(cjPres.metrica || '').trim() === String(comp || '').trim();
+
+  return {
+    ok: !!(okMorta && okSubst && okComp && preserva),
+    substitui_metrica_fraca: okSubst,
+    composta_forte_interna: okComp,
+    preserva_metrica_forte: preserva,
+    vinda_de_campo_morto: okMorta,
   };
 }
 
