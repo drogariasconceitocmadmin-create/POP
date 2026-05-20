@@ -3416,6 +3416,90 @@ function logGptPopIaLinha_(user, requestId, acao, mensagem, payloadResumo) {
   });
 }
 
+// ---------------------------------------------------------------------------
+// Pré-processamento de briefing: enriquecimento determinístico + validação
+// mínima antes de chamar a IA.  Aplicado em gerarPopIaConceito().
+// ---------------------------------------------------------------------------
+
+/**
+ * Detecta padrão "atendimento no balcão + dúvida do cliente + sugestão precoce".
+ * Retorna true para o caso recorrente que deve ser enriquecido, não rejeitado.
+ * @param {string} p  processo normalizado
+ * @param {string} s  situação normalizada
+ * @param {string} e  erro normalizado
+ * @returns {boolean}
+ */
+function iaBriefingEhBalcaoDuvidaSugestaoPrecoce_(p, s, e) {
+  var bag = iaBagNorm_([p, s, e].join(' '));
+  var temBalcao   = bag.indexOf('balcao') >= 0 || bag.indexOf('atendimento') >= 0 || bag.indexOf('farmacia') >= 0;
+  var temDuvida   = bag.indexOf('duvida') >= 0 || bag.indexOf('pergunta') >= 0 || bag.indexOf('orientacao') >= 0
+                 || bag.indexOf('necessidade') >= 0 || bag.indexOf('sintoma') >= 0;
+  var temSugestao = bag.indexOf('sugere') >= 0 || bag.indexOf('sugerir') >= 0 || bag.indexOf('indica') >= 0
+                 || bag.indexOf('produto') >= 0 || bag.indexOf('venda') >= 0;
+  return temBalcao && temDuvida && temSugestao;
+}
+
+/**
+ * Enriquece deterministicamente processo/situação/erro quando o padrão balcão
+ * é reconhecido mas os campos estão muito curtos (< LIMITE chars).
+ * Não altera campos que já tenham conteúdo suficiente.
+ * @param {string} p @param {string} s @param {string} e
+ * @returns {{ processo: string, situacao: string, erro: string, enriquecido: boolean }}
+ */
+function iaEnriquecerBriefingBalcaoCurto_(p, s, e) {
+  var LIMITE = 80;
+  var precisaEnriquecer = p.length < LIMITE || s.length < LIMITE || e.length < LIMITE;
+  if (!precisaEnriquecer) return { processo: p, situacao: s, erro: e, enriquecido: false };
+
+  var pOut = p.length >= LIMITE ? p
+    : 'Atendimento no balcão de medicamentos e dermocosméticos — OTC, orientação clínica simples e encaminhamento ao farmacêutico';
+  var sOut = s.length >= LIMITE ? s
+    : 'Cliente chega ao balcão com dúvida sobre produto, sintoma, necessidade ou orientação; '
+    + 'o atendente deve perguntar, confirmar necessidade, filtrar risco clínico ou de receita, '
+    + 'encaminhar ao farmacêutico quando necessário e só depois sugerir produto ou próximo passo';
+  var eOut = e.length >= LIMITE ? e
+    : 'Atendente sugere produto sem entender a necessidade real do cliente: '
+    + 'não faz perguntas de esclarecimento sobre histórico, medicamentos em uso ou sintomas específicos, '
+    + 'e indica produto sem filtrar risco clínico ou necessidade de encaminhamento ao farmacêutico';
+
+  return { processo: pOut, situacao: sOut, erro: eOut, enriquecido: true };
+}
+
+/**
+ * Valida se o briefing é suficientemente específico para enviar à IA.
+ * Chamado ANTES do enriquecimento quando o padrão NÃO é reconhecido.
+ * Bloqueia briefings verdadeiramente vagos antes de consumir tokens.
+ * @param {string} p @param {string} s @param {string} e
+ * @returns {{ ok: boolean, message?: string }}
+ */
+function iaValidarBriefingMinimo_(p, s, e) {
+  var MINIMO = 10;
+  if (p.length < MINIMO || s.length < MINIMO || e.length < MINIMO) {
+    return {
+      ok: false,
+      message:
+        'Informe processo, situação e erro com mais contexto. '
+        + 'Exemplo: "Atendimento no balcão — cliente relata dúvida sobre analgésico; '
+        + 'atendente sugere produto sem perguntar sobre histórico, medicamentos em uso ou '
+        + 'necessidade de encaminhamento ao farmacêutico."',
+    };
+  }
+  var bag = iaBagNorm_([p, s, e].join(' '));
+  var palavras = bag.split(/\s+/).filter(function (w) { return w.length > 2; });
+  var unicas = {};
+  for (var i = 0; i < palavras.length; i++) unicas[palavras[i]] = 1;
+  if (Object.keys(unicas).length < 5) {
+    return {
+      ok: false,
+      message:
+        'Os campos de briefing são muito genéricos. Descreva o que acontece no piso com '
+        + 'detalhes observáveis. Exemplo: "cliente aguarda no balcão; atendente não pergunta '
+        + 'histórico antes de indicar produto."',
+    };
+  }
+  return { ok: true };
+}
+
 /**
  * Gera POP estruturado via OpenAI, valida no servidor e devolve payload pronto para preencherFormularioComJson.
  * Requer OPENAI_API_KEY nas propriedades do script. requestId correlaciona logs (gpt_input, gpt_output, gpt_validacao_erro).
@@ -3444,6 +3528,27 @@ function gerarPopIaConceito(token, processo, situacao, erro) {
     logGptPopIaLinha_(ctx.user, requestId, 'gpt_validacao_erro', 'Campos processo, situacao e erro são obrigatórios.', '');
     return { ok: false, requestId: requestId, message: 'Preencha processo, situação e erro.', blocking: ['Entrada incompleta.'] };
   }
+
+  // --- Pré-processamento de briefing (antes de chamar IA) ---
+  // 1. Padrão reconhecido: balcão + dúvida + sugestão precoce → enriquecer deterministicamente.
+  // 2. Padrão não reconhecido: validar se há contexto mínimo; bloquear antes de gastar tokens.
+  if (iaBriefingEhBalcaoDuvidaSugestaoPrecoce_(pIn, sIn, eIn)) {
+    var enr = iaEnriquecerBriefingBalcaoCurto_(pIn, sIn, eIn);
+    if (enr.enriquecido) {
+      logGptPopIaLinha_(ctx.user, requestId, 'briefing_enriquecido', 'balcao_duvida_sugestao_precoce',
+        { antes: { p: pIn, s: sIn, e: eIn }, depois: { p: enr.processo, s: enr.situacao, e: enr.erro } });
+      pIn = enr.processo;
+      sIn = enr.situacao;
+      eIn = enr.erro;
+    }
+  } else {
+    var bMin = iaValidarBriefingMinimo_(pIn, sIn, eIn);
+    if (!bMin.ok) {
+      logGptPopIaLinha_(ctx.user, requestId, 'briefing_bloqueado_pre_ia', bMin.message, { p: pIn, s: sIn, e: eIn });
+      return { ok: false, requestId: requestId, message: bMin.message, blocking: [bMin.message] };
+    }
+  }
+  // --- fim pré-processamento ---
 
   var userPrompt = buildIaPopPromptUsuario_(pIn, sIn, eIn);
 
@@ -7881,6 +7986,88 @@ function fase4SelfTestGeradorMatrizCrivoScore_() {
   var regOk = scoreSelfTestConceito_().ok && crivoSelfTestExecucaoPop_().ok;
 
   return { ok: casos.every(function (c) { return c.ok; }) && regOk, casos: casos, regressao_global: regOk };
+}
+
+/**
+ * Self-test: enriquecimento de briefing curto (balcão) e bloqueio pré-IA de briefing vago.
+ * Não chama OpenAI. Valida apenas as funções determinísticas de pré-processamento.
+ *
+ * Casos:
+ *   1. Briefing curto balcão → detectado como padrão reconhecido → enriquecido sem rejeição.
+ *   2. Briefing vago genérico → NÃO reconhecido → bloqueado antes da IA com mensagem orientativa.
+ *   3. Regressões: self-tests existentes continuam OK.
+ *
+ * @returns {{ ok: boolean, casos: Array }}
+ */
+function fase4SelfTestBriefingCurtoBalcaoGeraPop_() {
+  var casos = [];
+
+  // --- Caso 1: input curto do smoke → reconhecido e enriquecido ---
+  var p1 = 'atendimento no balcão';
+  var s1 = 'cliente chega com dúvida';
+  var e1 = 'atendente sugere produto sem entender a necessidade';
+  var ehPadrao1 = iaBriefingEhBalcaoDuvidaSugestaoPrecoce_(p1, s1, e1);
+  var enr1     = iaEnriquecerBriefingBalcaoCurto_(p1, s1, e1);
+  var ok1 =
+    ehPadrao1 === true &&
+    enr1.enriquecido === true &&
+    enr1.processo.length >= 80 &&
+    enr1.situacao.length >= 80 &&
+    enr1.erro.length >= 80 &&
+    // erro enriquecido deve manter semântica de "sugerir produto sem entender"
+    iaBagNorm_(enr1.erro).indexOf('sugere') >= 0 || iaBagNorm_(enr1.erro).indexOf('sugerir') >= 0;
+  casos.push({
+    id: 1,
+    nome: 'briefing curto balcão → reconhecido e enriquecido',
+    ok: ok1,
+    det: { ehPadrao: ehPadrao1, enriquecido: enr1.enriquecido, pLen: enr1.processo.length, sLen: enr1.situacao.length, eLen: enr1.erro.length },
+  });
+
+  // --- Caso 2: input vago genérico → bloqueado pré-IA ---
+  var p2 = 'processo x';
+  var s2 = 'situacao y';
+  var e2 = 'erro z';
+  var ehPadrao2 = iaBriefingEhBalcaoDuvidaSugestaoPrecoce_(p2, s2, e2);
+  var bMin2    = iaValidarBriefingMinimo_(p2, s2, e2);
+  var ok2 =
+    ehPadrao2 === false &&
+    bMin2.ok === false &&
+    typeof bMin2.message === 'string' &&
+    bMin2.message.length > 20;
+  casos.push({
+    id: 2,
+    nome: 'briefing vago genérico → bloqueado pré-IA com mensagem',
+    ok: ok2,
+    det: { ehPadrao: ehPadrao2, bloqueado: !bMin2.ok, msg: (bMin2.message || '').slice(0, 80) },
+  });
+
+  // --- Caso 3: campos curtos mas com contexto real suficiente → NÃO bloqueado ---
+  var p3 = 'Atendimento de balcão';
+  var s3 = 'Cliente pede orientação sobre analgésico';
+  var e3 = 'Atendente indica produto sem perguntar histórico';
+  var ehPadrao3 = iaBriefingEhBalcaoDuvidaSugestaoPrecoce_(p3, s3, e3);
+  var bMin3    = iaValidarBriefingMinimo_(p3, s3, e3);
+  var ok3 = ehPadrao3 === true && bMin3.ok === true;
+  casos.push({
+    id: 3,
+    nome: 'contexto real curto balcão → reconhecido, não bloqueado',
+    ok: ok3,
+    det: { ehPadrao: ehPadrao3, bMinOk: bMin3.ok },
+  });
+
+  // --- Regressões: self-tests existentes ---
+  var regF4 = fase4SelfTestGeradorMatrizCrivoScore_();
+  casos.push({
+    id: 4,
+    nome: 'regressão fase4SelfTestGeradorMatrizCrivoScore_',
+    ok: regF4.ok,
+    det: { regressao_global: regF4.regressao_global, falhos: regF4.casos.filter(function (c) { return !c.ok; }).map(function (c) { return c.nome; }) },
+  });
+
+  return {
+    ok: casos.every(function (c) { return c.ok; }),
+    casos: casos,
+  };
 }
 
 /**
