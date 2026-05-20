@@ -4426,7 +4426,10 @@
       const s = valueOf('pop_ia_situacao');
       const e = valueOf('pop_ia_erro');
       const msgEl = document.getElementById('pop_ia_msg');
-      const prev = document.getElementById('pop_ia_preview');
+      const prev  = document.getElementById('pop_ia_preview');
+      // Botão que disparou — para estado loading
+      const btnGerar = document.querySelector('#pop_ia_block_wrap button[onclick="gerarPopIaConceitoFrontend()"]')
+                    || document.querySelector('#pop_ia_block_wrap button');
       if (msgEl) msgEl.innerText = '';
       if (prev) {
         prev.classList.add('hidden');
@@ -4444,12 +4447,21 @@
         return;
       }
 
-      if (msgEl) msgEl.innerText = 'A gerar com IA e a validar no servidor…';
+      // --- UX: estado Gerando ---
+      const TEXTO_ORIGINAL = btnGerar ? (btnGerar.textContent || 'Gerar com IA (validação no servidor)') : '';
+      function setGerandoState_(ativo) {
+        if (!btnGerar) return;
+        btnGerar.disabled = ativo;
+        btnGerar.textContent = ativo ? 'Gerando…' : TEXTO_ORIGINAL;
+      }
+      setGerandoState_(true);
+      if (msgEl) msgEl.innerText = 'Gerando POP com IA, aguarde…';
 
       callBackend(
         'gerarPopIaConceito',
         [currentToken, p, s, e],
         function (res) {
+          setGerandoState_(false);
           if (blBox) {
             blBox.classList.add('hidden');
             blBox.innerHTML = '';
@@ -4489,10 +4501,12 @@
           if (rev && rev.scrollIntoView) rev.scrollIntoView({ behavior: 'smooth', block: 'start' });
         },
         function (res) {
+          setGerandoState_(false);
           const raw = formatBackendError_('gerarPopIaConceito', res, 'Geração bloqueada pela validação no servidor.');
           showToast(raw, 'error');
-          const hintAcao =
-            ' O que fazer: refine processo, situação e erro com o que foi visto no piso; confira "Como fazer bem" e "Erro crítico" se o formulário veio preenchido; ou use importação por JSON.';
+          const hintAcao = res && res.message && res.message.length > 60
+            ? '' // mensagem do servidor já é orientativa (ex.: bloqueio pré-IA)
+            : ' O que fazer: refine processo, situação e erro com o que foi visto no piso; confira "Como fazer bem" e "Erro crítico" se o formulário veio preenchido; ou use importação por JSON.';
           if (msgEl) msgEl.innerText = String(res && res.message ? res.message : raw) + hintAcao;
           const list =
             Array.isArray(res && res.blocking) && res.blocking.length
