@@ -1,0 +1,125 @@
+{
+  "titulo": "Validação POP — frequência crítico orientada a evento (P0)",
+  "data_iso": "2026-05-05",
+  "projeto": "Portal de POPs (Sis Drogaria)",
+  "script_id_pop": "1aNJwuBlFksSAM3NhU6y1Jj6zU841239n59YXxnFAL6EXY7YjTr7lL8Y8",
+  "clasp_root": "apps-script",
+  "branch": "cursor/qa-metrica-pos-patch-fase4",
+  "commit_validado": "1c6cd0dc30b1f71cdeda0b42b4f929387dca0adf",
+  "mensagem_commit": "Fase4: frequencia critica por demanda com texto operacional",
+  "handover_preservado": true,
+  "notas_ambiente": [
+    "Skills solicitadas (aios/skills/git-safety, pop, codex-validate) não encontradas no workspace; procedimento seguiu AGENTS.md da raiz Sis Drogaria.",
+    "clasp run falhou com: Script function not found — projeto não exposto como API executável para clasp run (bloqueio automático dos self-tests remotos)."
+  ],
+  "status_geral": "APROVADO_COMRESSALVA",
+  "veredito": "Critérios P0 verificados por revisão estática do commit 1c6cd0d em Código.js e Index.html; execução remota dos self-tests via clasp run não disponível. clasp push já estava sincronizado; deploy Web App POP atualizado para versão @121.",
+  "clasp_push": {
+    "executado": true,
+    "resultado": "Script is already up to date."
+  },
+  "deploy": {
+    "executado": true,
+    "deployment_id": "AKfycbx53geW1UL8ez37rXZ6FqxaFf7QstRIU4O8r3ngqOEfM07KVoLAJS-8X9fx2XXvRgD9",
+    "versao_apps_script_listagem": 121,
+    "versao_criada_ant_deploy": 120,
+    "descricao_deployment": "POP Web App P0 frequência crítico QA branch (commit 1c6cd0d)",
+    "url_web_app": "https://script.google.com/macros/s/AKfycbx53geW1UL8ez37rXZ6FqxaFf7QstRIU4O8r3ngqOEfM07KVoLAJS-8X9fx2XXvRgD9/exec"
+  },
+  "criterios_codigo": [
+    {
+      "id": "normalizeFrequenciaCritico_evento",
+      "descricao": "normalizeFrequenciaCritico_ aceita frases orientadas a evento (sempre que / quando houver / a cada atendimento / etc.)",
+      "status": "OK",
+      "evidencia": "Código.js ~1806–1832: flags eventoPorDemanda + iaBagNorm_"
+    },
+    {
+      "id": "frase_balcao_por_demanda",
+      "descricao": "Frase geradorBalcaoFrequenciaEvento_ normaliza para por_demanda",
+      "status": "OK",
+      "evidencia": "geradorBalcaoFrequenciaEvento_(); bag contém semprequehouve; fase4SelfTestFrequenciaCriticoBalcao_ assert c1.frequencia===por_demanda"
+    },
+    {
+      "id": "frequencia_texto_operacional_preservado",
+      "descricao": "frequencia_texto_operacional preserva frase completa quando canónico é por_demanda",
+      "status": "OK",
+      "evidencia": "popSincronizarFrequenciaCriticoConteudoJson_; normalizePopJsonPayload_ ~9264–9325"
+    },
+    {
+      "id": "validatePopCritico_nao_bloqueia_ia",
+      "descricao": "validatePopCritico_ não bloqueia quando texto operacional resolve frequência",
+      "status": "OK",
+      "evidencia": "fqProbe usa frequencia OU frequencia_texto_operacional (~1911–1913)"
+    },
+    {
+      "id": "payload_canonico_valido",
+      "descricao": "normalizePopJsonPayload_ envia frequência canónica (diario|semanal|por_demanda)",
+      "status": "OK",
+      "evidencia": "~9261–9285 + popSincronizarFrequenciaCriticoConteudoJson_"
+    },
+    {
+      "id": "preencherFormulario_select",
+      "descricao": "preencherFormularioComJson + inferirValorSelectFrequenciaCritica_ preenchem select por_demanda para frase longa/evento",
+      "status": "OK",
+      "evidencia": "Index.html ~4612–4715; regex sempre que|quando houver|..."
+    },
+    {
+      "id": "viewer_frase_operacional",
+      "descricao": "Viewer usa humanizeFrequenciaCritico_ priorizando texto operacional (não mostra só Diário)",
+      "status": "OK",
+      "evidencia": "Index.html ~5383–5390 + render ~5899"
+    },
+    {
+      "id": "frequencia_vazia_bloqueada",
+      "descricao": "Frequência vazia em POP crítico continua bloqueada",
+      "status": "OK",
+      "evidencia": "validatePopCritico_ !fqProbe throw; self-test n3 !v3.ok"
+    }
+  ],
+  "testes_esperados_execucao_remota": [
+    {
+      "nome": "fase4SelfTestFrequenciaCriticoBalcao_",
+      "status": "NAO_EXECUTADO",
+      "motivo": "clasp run: API executable / função não encontrada no runtime remoto"
+    },
+    {
+      "nome": "fase4SelfTestFidelidadeBriefingBalcao_",
+      "status": "NAO_EXECUTADO",
+      "motivo": "idem"
+    },
+    {
+      "nome": "fase4SelfTestGuardCriticoSemContexto_",
+      "status": "NAO_EXECUTADO",
+      "motivo": "idem"
+    },
+    {
+      "nome": "fase4SelfTestRoundTripStandardsPersistencia_",
+      "status": "NAO_EXECUTADO",
+      "motivo": "idem"
+    },
+    {
+      "nome": "fase4SelfTestStandardsAuditaveisBalcao_",
+      "status": "NAO_EXECUTADO",
+      "motivo": "idem"
+    },
+    {
+      "nome": "crivoSelfTestExecucaoPop_",
+      "status": "NAO_EXECUTADO",
+      "motivo": "idem"
+    },
+    {
+      "nome": "scoreSelfTestConceito_",
+      "status": "NAO_EXECUTADO",
+      "motivo": "idem"
+    }
+  ],
+  "falhas": {
+    "criticas": [],
+    "medias": [
+      "Execução automatizada clasp run dos self-tests bloqueada (API executable)."
+    ],
+    "leves": [
+      "Skills em aios/skills/ não localizadas neste ambiente."
+    ]
+  }
+}
